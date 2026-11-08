@@ -16,7 +16,7 @@ def _load_env():
 
 _load_env()
 
-BOT_TOKEN = "".join(os.environ.get("BOT_TOKEN", "").split())
+BOT_TOKEN = (__import__("re").findall(r"\d{6,}:[A-Za-z0-9_-]{30,}", os.environ.get("BOT_TOKEN", "")) or [""])[0]
 ADMIN_ID = int(os.environ.get("ADMIN_ID") or 0)
 RATE_MARKUP = 1 + float(os.environ.get("RATE_MARKUP_PERCENT") or 8) / 100
 PROXY_URL = os.environ.get("PROXY_URL") or None
