@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import random
+import time
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
@@ -14,6 +15,7 @@ from sources import Item, Source
 
 log = logging.getLogger("poller")
 MAX_PER_TERM = 20  # защита от потока сообщений
+CONCURRENCY = 4  # сколько запросов к одной площадке одновременно
 
 
 def format_caption(item: Item, source: Source, brand: str, rates: Rates) -> str:
@@ -59,26 +61,48 @@ async def process(db: DB, bot: Bot, rates: Rates, source: Source, brand: str, qu
         caption = format_caption(i, source, brand, rates)
         for uid in users:
             await send(bot, uid, i, caption)
-            await asyncio.sleep(0.05)
 
 
-async def source_loop(db: DB, bot: Bot, rates: Rates, source: Source):
+async def poll_source_once(db: DB, bot: Bot, rates: Rates, source: Source) -> tuple[int, int]:
+    """Проверяет ВСЕ бренды на площадке одновременно. Новое отправляется сразу."""
+    sem = asyncio.Semaphore(CONCURRENCY)
+    result = {"ok": 0, "fail": 0}
+
+    async def one(brand: str, query: str):
+        async with sem:
+            try:
+                await process(db, bot, rates, source, brand, query)
+                result["ok"] += 1
+            except Exception as e:
+                result["fail"] += 1
+                log.warning("%s '%s': %s", source.code, query, e)
+            await asyncio.sleep(random.uniform(0.1, 0.4))
+
+    jobs = []
+    for brand in db.active_terms(source.code):
+        queries = [brand]
+        if source.lang:
+            queries += await translate.variants(brand, source.lang)
+        jobs += [one(brand, q) for q in queries]
+    if jobs:
+        await asyncio.gather(*jobs)
+    return result["ok"], result["fail"]
+
+
+async def source_loop(db: DB, bot: Bot, rates: Rates, source: Source, end: float | None = None):
+    """Бесконечный цикл (VPS) или цикл до момента end (GitHub Actions)."""
     backoff = 0
-    await asyncio.sleep(random.uniform(0, 10))
+    await asyncio.sleep(random.uniform(0, 5))
     while True:
         try:
-            for brand in db.active_terms(source.code):
-                queries = [brand]
-                if source.lang:
-                    queries += await translate.variants(brand, source.lang)
-                for q in queries:
-                    await process(db, bot, rates, source, brand, q)
-                    await asyncio.sleep(random.uniform(1.5, 3.5))
-            backoff = 0
+            ok, fail = await poll_source_once(db, bot, rates, source)
+            backoff = min(backoff * 2 + 30, 600) if (fail and not ok) else 0
         except Exception as e:
             backoff = min(backoff * 2 + 30, 600)
             log.warning("%s: ошибка %s, пауза %ss", source.code, e, backoff)
-        await asyncio.sleep(config.POLL_INTERVAL + backoff + random.uniform(0, 8))
+        if end is not None and time.monotonic() >= end:
+            break
+        await asyncio.sleep(config.POLL_INTERVAL + backoff + random.uniform(0, 3))
 
 
 async def run_poller(db: DB, bot: Bot, rates: Rates, sources: list[Source]):

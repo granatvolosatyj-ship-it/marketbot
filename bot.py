@@ -100,7 +100,10 @@ async def countries(m: Message):
     if not has_access(m.from_user.id):
         return await deny(m)
     soon = ", ".join(s.label for s in sources if not s.ready)
-    await m.answer(f"Где искать (нажми, чтобы переключить).\nСкоро: {soon}", reply_markup=countries_kb(m.from_user.id))
+    text = "Где искать. Нажми на страну, чтобы переключить.\n✅ включено, ❌ выключено"
+    if soon:
+        text += f"\nСкоро: {soon}"
+    await m.answer(text, reply_markup=countries_kb(m.from_user.id))
 
 
 @router.callback_query(F.data.startswith("tg:"))
@@ -109,9 +112,13 @@ async def toggle(c: CallbackQuery):
         return await c.answer()
     code = c.data.split(":")[1]
     off = db.disabled_sources(c.from_user.id)
-    db.set_source(c.from_user.id, code, code in off)
-    await c.message.edit_reply_markup(reply_markup=countries_kb(c.from_user.id))
-    await c.answer()
+    now_on = code in off
+    db.set_source(c.from_user.id, code, now_on)
+    await c.answer("Включено ✅" if now_on else "Выключено ❌")  # сразу убирает «часики»
+    try:
+        await c.message.edit_reply_markup(reply_markup=countries_kb(c.from_user.id))
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("all:"))
@@ -121,8 +128,11 @@ async def toggle_all(c: CallbackQuery):
     enable = c.data.endswith("on")
     for s in ready:
         db.set_source(c.from_user.id, s.code, enable)
-    await c.message.edit_reply_markup(reply_markup=countries_kb(c.from_user.id))
-    await c.answer()
+    await c.answer("Все включены ✅" if enable else "Все выключены ❌")
+    try:
+        await c.message.edit_reply_markup(reply_markup=countries_kb(c.from_user.id))
+    except Exception:
+        pass
 
 
 # ---------- админка

@@ -245,6 +245,65 @@ class Bunjang(Source):
         return out
 
 
+# ---------------------------------------------------------------- 2nd STREET JP
+class SecondStreet(Source):
+    """ЭКСПЕРИМЕНТАЛЬНО: разбор HTML без знания точной вёрстки сайта (ищем ссылки
+    на товары /goods/detail, рядом цену в иенах и картинку). Если сайт устроен
+    иначе, в логах будет предупреждение «ничего не найдено»."""
+
+    code = "2ndstreet_jp"
+    label = "2nd STREET (тест)"
+    flag = "🇯🇵"
+    currency = "JPY"
+    lang = "ja"
+
+    async def search(self, term: str) -> list[Item]:
+        import html as htmllib
+        import logging
+        import re
+
+        r = await self.client.get(
+            "https://www.2ndstreet.jp/search",
+            params={"keyword": term, "sortBy": "arrival"},
+            headers={"Accept-Language": "ja,en;q=0.8"},
+        )
+        r.raise_for_status()
+        page = r.text
+        matches = [
+            (m.start(), m.group(1), m.group(2))
+            for m in re.finditer(r'href="([^"]*?/goods/detail\?[^"]*?goodsId=(\w+)[^"]*)"', page)
+        ]
+        out, done = [], set()
+        for i, (pos, href, gid) in enumerate(matches):
+            if gid in done:
+                continue
+            done.add(gid)
+            j = i + 1
+            while j < len(matches) and matches[j][2] == gid:
+                j += 1
+            end = matches[j][0] if j < len(matches) else pos + 4000
+            chunk = page[pos : min(end, pos + 4000)]
+            pm = re.search(r"¥\s*([\d,]+)|([\d,]+)\s*円", chunk)
+            if not pm:
+                continue
+            price = float((pm.group(1) or pm.group(2)).replace(",", ""))
+            am = re.search(r'alt="([^"]{3,})"', chunk)
+            title = htmllib.unescape(am.group(1)).strip() if am else "Товар 2nd STREET"
+            im = re.search(r'(?:data-src|src)="((?:https?:)?//[^"]+?\.(?:jpe?g|png|webp)[^"]*)"', chunk)
+            photo = None
+            if im:
+                photo = im.group(1)
+                if photo.startswith("//"):
+                    photo = "https:" + photo
+            href = htmllib.unescape(href)
+            if href.startswith("/"):
+                href = "https://www.2ndstreet.jp" + href
+            out.append(Item(self.code, gid, title, price, "JPY", href, photo))
+        if not out:
+            logging.getLogger("2ndstreet").warning("'%s': ничего не найдено (вёрстка могла измениться)", term)
+        return out
+
+
 # ------------------------------------------- Площадки, которые ещё не готовы
 class NotReady(Source):
     ready = False
@@ -263,11 +322,10 @@ VINTED_DOMAINS = [
 
 def build_sources() -> list[Source]:
     s: list[Source] = [Vinted(*d) for d in VINTED_DOMAINS]
-    s += [MercariJP(), Bunjang()]
-    # В разработке: страницы/запросы ещё не изучены
+    s += [MercariJP(), Bunjang(), SecondStreet()]
+    # В разработке: запросы этих площадок ещё не изучены
     s += [
         NotReady("fruits_kr", "Fruits Family", "🇰🇷", "KRW", "ko"),
-        NotReady("2ndstreet_jp", "2nd STREET", "🇯🇵", "JPY", "ja"),
         NotReady("95_cn", "95分", "🇨🇳", "CNY"),
     ]
     return s
