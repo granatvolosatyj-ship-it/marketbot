@@ -173,6 +173,26 @@ async def users(m: Message):
     await m.answer(text or "Пока никого.")
 
 
+# ---------- диагностика: показывает, какие площадки отвечают
+@router.message(Command("test"))
+async def test_sources(m: Message):
+    if not is_admin(m):
+        return
+    wait = await m.answer("Проверяю площадки, подожди до 30 секунд...")
+
+    async def check(s):
+        try:
+            items = await asyncio.wait_for(s.search("nike"), timeout=25)
+            return f"✅ {s.label}: {len(items)} объявл."
+        except Exception as e:
+            resp = getattr(e, "response", None)
+            code = f"HTTP {resp.status_code}" if resp is not None else type(e).__name__
+            return f"❌ {s.label}: {code}"
+
+    lines = await asyncio.gather(*(check(s) for s in ready))
+    await wait.edit_text("Результат проверки (запрос «nike»):\n" + "\n".join(lines))
+
+
 # ---------- любой текст = новый бренд
 @router.message(F.text & ~F.text.startswith("/"))
 async def add_brand(m: Message):
