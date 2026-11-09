@@ -187,7 +187,12 @@ async def test_sources(m: Message):
         except Exception as e:
             resp = getattr(e, "response", None)
             code = f"HTTP {resp.status_code}" if resp is not None else type(e).__name__
-            return f"❌ {s.label}: {code}"
+            line = f"❌ {s.label}: {code}"
+            if resp is not None and s.code in ("vinted_fr", "bunjang", "2ndstreet_jp"):
+                body = " ".join(resp.text.split())[:160]
+                server = resp.headers.get("server", "?")
+                line += f"\n   сервер: {html.escape(server)}\n   ответ: {html.escape(body)}"
+            return line
 
     lines = await asyncio.gather(*(check(s) for s in ready))
     await wait.edit_text("Результат проверки (запрос «nike»):\n" + "\n".join(lines))
