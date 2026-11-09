@@ -33,6 +33,7 @@ class Source:
     currency = ""
     lang: str | None = None  # 'ja' / 'ko' для поиска на местном языке
     ready = True
+    impersonate = False  # True: запросы с «отпечатком» настоящего Chrome (curl_cffi)
 
     def __init__(self):
         self.client = httpx.AsyncClient(
@@ -41,6 +42,20 @@ class Source:
             headers={"User-Agent": UA},
             proxy=config.PROXY_URL,
         )
+        self.cffi = None
+        if self.impersonate:
+            try:
+                from curl_cffi.requests import AsyncSession
+
+                kw = {"impersonate": "chrome", "timeout": 25}
+                if config.PROXY_URL:
+                    kw["proxies"] = {"http": config.PROXY_URL, "https": config.PROXY_URL}
+                self.cffi = AsyncSession(**kw)
+            except Exception:  # нет библиотеки: работаем обычным клиентом
+                self.cffi = None
+
+    async def get(self, url: str, **kw):
+        return await (self.cffi or self.client).get(url, **kw)
 
     async def search(self, term: str) -> list[Item]:
         raise NotImplementedError
@@ -48,6 +63,8 @@ class Source:
 
 # ---------------------------------------------------------------- Vinted
 class Vinted(Source):
+    impersonate = True
+
     def __init__(self, tld: str, currency: str, flag: str):
         super().__init__()
         self.tld = tld
@@ -58,11 +75,12 @@ class Vinted(Source):
         self._has_cookie = False
 
     async def _refresh(self):
-        self.client.cookies.clear()
-        await self.client.get(
+        (self.cffi or self.client).cookies.clear()
+        r = await self.get(
             f"https://www.vinted.{self.tld}/",
             headers={"Accept": "text/html,application/xhtml+xml"},
         )
+        r.raise_for_status()  # если главная страница закрыта, ошибка будет видна в /test
         self._has_cookie = True
 
     async def search(self, term: str) -> list[Item]:
@@ -72,7 +90,7 @@ class Vinted(Source):
         params = {"search_text": term, "order": "newest_first", "per_page": 30, "page": 1}
         headers = {"Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9"}
         for attempt in (1, 2):
-            r = await self.client.get(url, params=params, headers=headers)
+            r = await self.get(url, params=params, headers=headers)
             if r.status_code in (401, 403) and attempt == 1:
                 await self._refresh()
                 continue
@@ -253,6 +271,7 @@ class SecondStreet(Source):
 
     code = "2ndstreet_jp"
     label = "2nd STREET (тест)"
+    impersonate = True
     flag = "🇯🇵"
     currency = "JPY"
     lang = "ja"
@@ -262,7 +281,7 @@ class SecondStreet(Source):
         import logging
         import re
 
-        r = await self.client.get(
+        r = await self.get(
             "https://www.2ndstreet.jp/search",
             params={"keyword": term, "sortBy": "arrival"},
             headers={"Accept-Language": "ja,en;q=0.8"},
