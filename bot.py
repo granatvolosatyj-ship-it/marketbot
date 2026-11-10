@@ -198,6 +198,66 @@ async def test_sources(m: Message):
     await wait.edit_text("Результат проверки (запрос «nike»):\n" + "\n".join(lines))
 
 
+# ---------- диагностика: показывает, что реально отдаёт страница поиска
+RAW_URLS = {
+    "bunjang": "https://m.bunjang.co.kr/search/products?q=nike&order=date",
+    "2ndstreet_jp": "https://www.2ndstreet.jp/search?keyword=nike&sortBy=arrival",
+}
+
+
+@router.message(Command("raw"))
+async def raw_page(m: Message, command: CommandObject):
+    if not is_admin(m):
+        return
+    import re
+
+    code = (command.args or "").strip()
+    s = next((x for x in sources if x.code == code), None)
+    if s is None:
+        return await m.answer("Формат: /raw vinted_fr  или  /raw bunjang  или  /raw 2ndstreet_jp")
+    if code.startswith("vinted_"):
+        url = f"https://www.vinted.{code.split('_')[1]}/catalog?search_text=nike&order=newest_first"
+    else:
+        url = RAW_URLS.get(code)
+    if not url:
+        return await m.answer("Для этой площадки проверка не настроена.")
+    try:
+        r = await s.get(url, headers={"Accept": "text/html,application/xhtml+xml",
+                                      "Accept-Language": "en,ja;q=0.8,ko;q=0.6"})
+    except Exception as e:
+        return await m.answer("Ошибка: " + html.escape(repr(e))[:500])
+    page = r.text
+    hints = ("/items/", "/products/", "/product/", "goods", "detail")
+    hrefs = []
+    for h in re.findall(r'href="([^"]+)"', page):
+        if any(x in h for x in hints) and h not in hrefs:
+            hrefs.append(h)
+    apis = list(dict.fromkeys(re.findall(r'https?://[\w.-]*api[\w.-]*/[^"\'\s<>\\]{0,80}', page)))
+    out = [f"HTTP {r.status_code}, размер {len(page)}"]
+    out.append("ссылки на товары: " + (" | ".join(hrefs[:5]) or "нет"))
+    out.append("api-адреса: " + (" | ".join(apis[:5]) or "нет"))
+    if hrefs:
+        i = page.find(hrefs[0])
+        out.append("кусок страницы:\n" + " ".join(page[max(0, i - 200): i + 900].split()))
+    await m.answer(html.escape("\n".join(out)[:3500]))
+
+
+@router.message(Command("peek"))
+async def peek(m: Message, command: CommandObject):
+    if not is_admin(m):
+        return
+    key = (command.args or "").strip().lower()
+    for s in ready:
+        if key and key in s.code and hasattr(s, "diag"):
+            await m.answer("Смотрю, подожди до 40 секунд...")
+            try:
+                text = await asyncio.wait_for(s.diag("nike"), timeout=40)
+            except Exception as e:
+                text = f"Ошибка: {e!r}"
+            return await m.answer(html.escape(text)[:3800])
+    await m.answer("Формат: /peek 2nd или /peek vinted")
+
+
 # ---------- любой текст = новый бренд
 @router.message(F.text & ~F.text.startswith("/"))
 async def add_brand(m: Message):

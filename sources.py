@@ -65,6 +65,30 @@ class Source:
 class Vinted(Source):
     impersonate = True
 
+    async def diag(self, term: str) -> str:
+        """Диагностика для команды /peek: что отвечает сайт."""
+        out = []
+        sess = self.cffi or self.client
+        r = await self.get(f"https://www.vinted.{self.tld}/", headers={"Accept": "text/html"})
+        try:
+            names = ", ".join(k for k, _ in sess.cookies.items())
+        except Exception:
+            names = "?"
+        out.append(f"Главная: HTTP {r.status_code}, cookie: {names or 'нет'}")
+        api = f"https://www.vinted.{self.tld}/api/v2/catalog/items"
+        r2 = await self.get(api, params={"search_text": term, "order": "newest_first", "per_page": 5},
+                            headers={"Accept": "application/json"})
+        out.append(f"API items: HTTP {r2.status_code}: {' '.join(r2.text.split())[:150]}")
+        r3 = await self.get(f"https://www.vinted.{self.tld}/catalog",
+                            params={"search_text": term, "order": "newest_first"},
+                            headers={"Accept": "text/html"})
+        t = r3.text
+        i = t.find("/items/")
+        out.append(f"Страница поиска: HTTP {r3.status_code}, {len(t)} симв., ссылок /items/: {t.count('/items/')}")
+        if i >= 0:
+            out.append("Фрагмент: " + " ".join(t[max(0, i - 150): i + 350].split()))
+        return "\n".join(out)
+
     def __init__(self, tld: str, currency: str, flag: str):
         super().__init__()
         self.tld = tld
@@ -272,6 +296,26 @@ class SecondStreet(Source):
     code = "2ndstreet_jp"
     label = "2nd STREET (тест)"
     impersonate = True
+
+    async def diag(self, term: str) -> str:
+        """Диагностика для команды /peek: что реально отдаёт страница поиска."""
+        import re
+
+        r = await self.get(
+            "https://www.2ndstreet.jp/search",
+            params={"keyword": term, "sortBy": "arrival"},
+            headers={"Accept-Language": "ja,en;q=0.8"},
+        )
+        t = r.text
+        m = re.search(r"/goods/", t)
+        frag = " ".join(t[max(0, m.start() - 300): m.start() + 900].split()) if m else "ссылок /goods/ нет"
+        return (
+            f"HTTP {r.status_code}, {len(t)} симв.\n"
+            f"goodsId: {t.count('goodsId')}, /goods/: {t.count('/goods/')}, "
+            f"¥: {t.count('¥')}, 円: {t.count('円')}\n"
+            f"__NEXT_DATA__: {'__NEXT_DATA__' in t}, ld+json: {'ld+json' in t}\n"
+            f"Фрагмент: {frag}"
+        )
     flag = "🇯🇵"
     currency = "JPY"
     lang = "ja"
@@ -290,7 +334,7 @@ class SecondStreet(Source):
         page = r.text
         matches = [
             (m.start(), m.group(1), m.group(2))
-            for m in re.finditer(r'href="([^"]*?/goods/detail\?[^"]*?goodsId=(\w+)[^"]*)"', page)
+            for m in re.finditer(r'href="([^"]*?/goods/detail[^"]*?goodsId[=/](\w+)[^"]*)"', page)
         ]
         out, done = [], set()
         for i, (pos, href, gid) in enumerate(matches):
@@ -307,7 +351,12 @@ class SecondStreet(Source):
                 continue
             price = float((pm.group(1) or pm.group(2)).replace(",", ""))
             am = re.search(r'alt="([^"]{3,})"', chunk)
-            title = htmllib.unescape(am.group(1)).strip() if am else "Товар 2nd STREET"
+            if am:
+                title = htmllib.unescape(am.group(1)).strip()
+            else:
+                txt = " ".join(re.sub(r"<[^>]+>", " ", chunk).split())
+                txt = re.sub(r"(¥\s*[\d,]+|[\d,]+\s*円).*", "", txt).strip()
+                title = htmllib.unescape(txt)[:150] or "Товар 2nd STREET"
             im = re.search(r'(?:data-src|src)="((?:https?:)?//[^"]+?\.(?:jpe?g|png|webp)[^"]*)"', chunk)
             photo = None
             if im:
