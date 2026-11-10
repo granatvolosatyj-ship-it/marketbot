@@ -317,7 +317,7 @@ class SecondStreet(Source):
             frag = (
                 f"title: {' '.join(title.group(1).split()) if title else '-'}\n"
                 f"ссылки/скрипты: {' | '.join(srcs[:12]) or 'нет'}\n"
-                f"встроенный код: {' '.join(' '.join(inline).split())[:600] or 'нет'}"
+                f"встроенный код: {' '.join(' '.join(inline).split())[600:2900] or 'нет'}"
             )
         return (
             f"HTTP {r.status_code}, {len(t)} симв.\n"
