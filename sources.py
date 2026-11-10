@@ -297,15 +297,45 @@ class SecondStreet(Source):
     label = "2nd STREET (тест)"
     impersonate = True
 
+    async def fetch(self, term: str):
+        """Загружает страницу поиска; если Akamai показал проверку «не бот»,
+        решает её (как это делает JS в браузере) и загружает страницу заново."""
+        import re
+
+        url = "https://www.2ndstreet.jp/search"
+        kw = dict(params={"keyword": term, "sortBy": "arrival"}, headers={"Accept-Language": "ja,en;q=0.8"})
+        r = await self.get(url, **kw)
+        for _ in range(3):
+            t = r.text
+            if "_sec/verify" not in t:
+                break
+            mi = re.search(r"var i = (\d+);", t)
+            mn = re.search(r'Number\("(\d+)"\s*\+\s*"(\d+)"\)', t)
+            mt = re.search(r'"bm-verify":\s*"([^"]+)"', t)
+            if not (mi and mn and mt):
+                break
+            pow_ = int(mi.group(1)) + int(mn.group(1) + mn.group(2))
+            cli = self.cffi or self.client
+            vr = await cli.post(
+                "https://www.2ndstreet.jp/_sec/verify?provider=interstitial",
+                json={"bm-verify": mt.group(1), "pow": pow_},
+                headers={"Content-Type": "application/json", "Referer": str(url)},
+            )
+            try:
+                data = vr.json()
+            except Exception:
+                data = {}
+            if isinstance(data, dict) and data.get("location"):
+                r = await self.get(data["location"])
+            else:
+                r = await self.get(url, **kw)
+        return r
+
     async def diag(self, term: str) -> str:
         """Диагностика для команды /peek: что реально отдаёт страница поиска."""
         import re
 
-        r = await self.get(
-            "https://www.2ndstreet.jp/search",
-            params={"keyword": term, "sortBy": "arrival"},
-            headers={"Accept-Language": "ja,en;q=0.8"},
-        )
+        r = await self.fetch(term)
         t = r.text
         m = re.search(r"/goods/", t)
         if m:
@@ -317,7 +347,7 @@ class SecondStreet(Source):
             frag = (
                 f"title: {' '.join(title.group(1).split()) if title else '-'}\n"
                 f"ссылки/скрипты: {' | '.join(srcs[:12]) or 'нет'}\n"
-                f"встроенный код: {' '.join(' '.join(inline).split())[600:2900] or 'нет'}"
+                f"встроенный код: {' '.join(' '.join(inline).split())[:600] or 'нет'}"
             )
         return (
             f"HTTP {r.status_code}, {len(t)} симв.\n"
@@ -335,11 +365,7 @@ class SecondStreet(Source):
         import logging
         import re
 
-        r = await self.get(
-            "https://www.2ndstreet.jp/search",
-            params={"keyword": term, "sortBy": "arrival"},
-            headers={"Accept-Language": "ja,en;q=0.8"},
-        )
+        r = await self.fetch(term)
         r.raise_for_status()
         page = r.text
         matches = [
