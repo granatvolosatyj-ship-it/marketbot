@@ -308,7 +308,17 @@ class SecondStreet(Source):
         )
         t = r.text
         m = re.search(r"/goods/", t)
-        frag = " ".join(t[max(0, m.start() - 300): m.start() + 900].split()) if m else "ссылок /goods/ нет"
+        if m:
+            frag = " ".join(t[max(0, m.start() - 300): m.start() + 900].split())
+        else:
+            srcs = re.findall(r'(?:src|href)="([^"]+)"', t)
+            inline = re.findall(r"<script[^>]*>(.*?)</script>", t, re.S)
+            title = re.search(r"<title>(.*?)</title>", t, re.S)
+            frag = (
+                f"title: {' '.join(title.group(1).split()) if title else '-'}\n"
+                f"ссылки/скрипты: {' | '.join(srcs[:12]) or 'нет'}\n"
+                f"встроенный код: {' '.join(' '.join(inline).split())[:600] or 'нет'}"
+            )
         return (
             f"HTTP {r.status_code}, {len(t)} симв.\n"
             f"goodsId: {t.count('goodsId')}, /goods/: {t.count('/goods/')}, "
