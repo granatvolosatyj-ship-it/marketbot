@@ -16,6 +16,8 @@ class DB:
                 user_id INTEGER, source TEXT, PRIMARY KEY(user_id, source));
             CREATE TABLE IF NOT EXISTS seen(
                 source TEXT, item_id TEXT, PRIMARY KEY(source, item_id));
+            CREATE TABLE IF NOT EXISTS sent(
+                user_id INTEGER, key TEXT, PRIMARY KEY(user_id, key));
             CREATE TABLE IF NOT EXISTS baselined(
                 source TEXT, term TEXT, PRIMARY KEY(source, term));
             """
@@ -98,3 +100,9 @@ class DB:
     def mark_seen(self, source: str, item_id: str):
         self.c.execute("INSERT OR IGNORE INTO seen(source, item_id) VALUES(?,?)", (source, item_id))
         self.c.commit()
+
+    def claim_sent(self, user_id: int, key: str) -> bool:
+        """True, если это объявление этому человеку ещё не отправляли (и сразу помечает)."""
+        cur = self.c.execute("INSERT OR IGNORE INTO sent(user_id, key) VALUES(?,?)", (user_id, key))
+        self.c.commit()
+        return cur.rowcount == 1

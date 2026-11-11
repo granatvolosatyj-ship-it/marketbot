@@ -2,7 +2,9 @@ import asyncio
 import html
 import logging
 import random
+import os
 import time
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
@@ -18,6 +20,26 @@ MAX_PER_TERM = 20  # защита от потока сообщений
 CONCURRENCY = 4  # сколько запросов к одной площадке одновременно
 
 
+TZ = timezone(timedelta(hours=int(os.environ.get("TZ_HOURS") or 5)))  # Екатеринбург = UTC+5
+
+
+def when_line(item: Item) -> str:
+    now = time.time()
+    if item.created:
+        ago = max(0, int(now - item.created))
+        if ago < 90:
+            rel = "только что"
+        elif ago < 3600:
+            rel = f"{ago // 60} мин назад"
+        elif ago < 86400:
+            rel = f"{ago // 3600} ч назад"
+        else:
+            rel = f"{ago // 86400} дн назад"
+        clock = datetime.fromtimestamp(item.created, TZ).strftime("%d.%m %H:%M")
+        return f"🕒 Выставлено: {clock} ({rel})\n"
+    return f"🕒 Найдено ботом: {datetime.fromtimestamp(now, TZ).strftime('%d.%m %H:%M')}\n"
+
+
 def format_caption(item: Item, source: Source, brand: str, rates: Rates) -> str:
     price = f"{item.price:,.0f}".replace(",", " ")
     rub = rates.to_rub(item.price, item.currency)
@@ -26,6 +48,7 @@ def format_caption(item: Item, source: Source, brand: str, rates: Rates) -> str:
         f"🛍 {html.escape(item.title)[:200]}\n"
         f"{source.flag} {source.label} · бренд: {html.escape(brand)}\n"
         f"💰 {price} {item.currency}{rub_s}\n"
+        f"{when_line(item)}"
         f"🔗 {item.url}"
     )
 
@@ -47,20 +70,30 @@ async def send(bot: Bot, uid: int, item: Item, caption: str):
             return  # пользователь заблокировал бота
 
 
+def dedup_key(source: Source, item) -> str:
+    # У Vinted номер объявления общий для всех стран: FR и NL показывают одно и то же
+    return f"vinted:{item.id}" if source.code.startswith("vinted_") else f"{source.code}:{item.id}"
+
+
 async def process(db: DB, bot: Bot, rates: Rates, source: Source, brand: str, query: str):
     items = await source.search(query)
     first_time = not db.is_baselined(source.code, query)
     new = [i for i in items if not db.is_seen(source.code, i.id)]
     for i in new:
         db.mark_seen(source.code, i.id)
+    users = db.subscribers(brand, source.code)
     if first_time:
         db.set_baselined(source.code, query)  # старые объявления не шлём
+        for i in new:
+            for uid in users:
+                db.claim_sent(uid, dedup_key(source, i))
         return
-    users = db.subscribers(brand, source.code)
     for i in list(reversed(new))[-MAX_PER_TERM:]:  # от старых к новым
         caption = format_caption(i, source, brand, rates)
+        key = dedup_key(source, i)
         for uid in users:
-            await send(bot, uid, i, caption)
+            if db.claim_sent(uid, key):  # одно и то же объявление в другой стране/по другому бренду не шлём
+                await send(bot, uid, i, caption)
 
 
 async def poll_source_once(db: DB, bot: Bot, rates: Rates, source: Source) -> tuple[int, int]:
@@ -80,9 +113,7 @@ async def poll_source_once(db: DB, bot: Bot, rates: Rates, source: Source) -> tu
 
     jobs = []
     for brand in db.active_terms(source.code):
-        queries = [brand]
-        if source.lang:
-            queries += await translate.variants(brand, source.lang)
+        queries = await translate.queries(brand, source.lang)
         jobs += [one(brand, q) for q in queries]
     if jobs:
         await asyncio.gather(*jobs)

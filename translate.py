@@ -46,11 +46,20 @@ BRANDS = {
     "hermes": ("エルメス", "에르메스"),
 }
 
-_cache: dict[tuple[str, str], str | None] = {}
+RU = {'nike': 'найк', 'adidas': 'адидас', 'supreme': 'суприм', 'stone island': 'стоун айленд', 'comme des garcons': 'комм де гарсон', 'yohji yamamoto': 'йоджи ямамото', 'issey miyake': 'иссей мияке', 'undercover': 'андеркавер', 'bape': 'бейп', 'the north face': 'норт фейс', 'patagonia': 'патагония', 'carhartt': 'кархартт', 'ralph lauren': 'ральф лорен', 'gucci': 'гуччи', 'prada': 'прада', 'louis vuitton': 'луи виттон', 'chanel': 'шанель', 'balenciaga': 'баленсиага', 'dior': 'диор', 'burberry': 'барберри', 'maison margiela': 'мезон марджела', 'rick owens': 'рик оуэнс', 'stussy': 'стюси', 'new balance': 'нью баланс', 'converse': 'конверс', 'vans': 'вэнс', 'asics': 'асикс', 'levis': 'левис', 'diesel': 'дизель', 'moncler': 'монклер', 'fear of god': 'фир оф гад', 'salomon': 'саломон', 'arcteryx': 'арктерикс', 'celine': 'селин', 'hermes': 'эрмес'}
+
+# обратный словарь: любое написание (ru / ja / ko) -> латиница
+REVERSE = {}
+for _lat, (_ja, _ko) in BRANDS.items():
+    for _name in (_ja, _ko, RU.get(_lat)):
+        if _name:
+            REVERSE[_name.lower()] = _lat
+
+_cache: dict[tuple[str, str, str], str | None] = {}
 
 
-async def _google(text: str, lang: str) -> str | None:
-    key = (text, lang)
+async def _google(text: str, lang: str, sl: str = "en") -> str | None:
+    key = (text, lang, sl)
     if key in _cache:
         return _cache[key]
     result = None
@@ -58,7 +67,7 @@ async def _google(text: str, lang: str) -> str | None:
         async with httpx.AsyncClient(timeout=10, proxy=config.PROXY_URL) as c:
             r = await c.get(
                 "https://translate.googleapis.com/translate_a/single",
-                params={"client": "gtx", "sl": "en", "tl": lang, "dt": "t", "q": text},
+                params={"client": "gtx", "sl": sl, "tl": lang, "dt": "t", "q": text},
             )
             result = r.json()[0][0][0]
             if result.lower() == text.lower():
@@ -72,7 +81,41 @@ async def _google(text: str, lang: str) -> str | None:
 async def variants(brand: str, lang: str) -> list[str]:
     """Дополнительные варианты запроса на местном языке (lang: 'ja' или 'ko')."""
     b = brand.lower().strip()
-    if b in BRANDS:
+    if b in BRANDS and lang in ("ja", "ko"):
         return [BRANDS[b][0 if lang == "ja" else 1]]
+    if b in RU and lang == "ru":
+        return [RU[b]]
     t = await _google(brand, lang)
     return [t] if t else []
+
+
+def _is_latin(text: str) -> bool:
+    return all(ord(ch) < 0x250 for ch in text)
+
+
+async def latin(brand: str) -> str:
+    """Бренд в латинице: «найк», «ナイキ», «나이키» -> «nike»."""
+    b = brand.lower().strip()
+    if _is_latin(b):
+        return b
+    if b in REVERSE:
+        return REVERSE[b]
+    t = await _google(b, "en", sl="auto")
+    return t.lower() if t else b
+
+
+async def queries(brand: str, lang: str | None) -> list[str]:
+    """Все варианты запроса для площадки: латиница + язык площадки (ja / ko / zh).
+    Можно вводить бренд на любом языке."""
+    lat = await latin(brand)
+    out = [lat]
+    if brand.lower().strip() != lat and not _is_latin(brand):
+        out.append(brand.lower().strip())  # как написал сам человек
+    if lang:
+        out += await variants(lat, lang)
+    seen, res = set(), []
+    for q in out:
+        if q and q.lower() not in seen:
+            seen.add(q.lower())
+            res.append(q)
+    return res

@@ -24,6 +24,26 @@ class Item:
     currency: str
     url: str
     photo: str | None = None
+    created: float | None = None  # когда выставлено (unix-время), если сайт это отдаёт
+
+
+def _ts(v) -> float | None:
+    """Unix-время из строки/числа; отбрасывает явную ерунду."""
+    try:
+        t = float(v)
+    except (TypeError, ValueError):
+        return None
+    if t > 1e12:  # миллисекунды
+        t /= 1000
+    return t if 1.4e9 < t < time.time() + 86400 else None
+
+
+def _vinted_ts(photo: str | None) -> float | None:
+    """Имя файла фото на Vinted = unix-время загрузки (приблизительно момент выставления)."""
+    import re
+
+    m = re.search(r"/(\d{10})\.(?:jpe?g|webp|png)", photo or "")
+    return _ts(m.group(1)) if m else None
 
 
 class Source:
@@ -163,6 +183,7 @@ class Vinted(Source):
                     self.currency,
                     f"https://www.vinted.{self.tld}{m.group(1).split('?')[0]}",
                     photo,
+                    _vinted_ts(photo),
                 )
             )
         if not out:
@@ -262,6 +283,7 @@ class MercariJP(Source):
                     "JPY",
                     f"https://jp.mercari.com/item/{it['id']}",
                     thumbs[0] if thumbs else None,
+                    _ts(it.get("created")),
                 )
             )
         return out
