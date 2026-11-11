@@ -108,40 +108,65 @@ class Vinted(Source):
         self._has_cookie = True
 
     async def search(self, term: str) -> list[Item]:
+        """Разбор HTML страницы каталога (внутренний API отдаёт 404, а страница открывается)."""
+        import html as htmllib
+        import logging
+        import re
+
         if not self._has_cookie:
             await self._refresh()
-        url = f"https://www.vinted.{self.tld}/api/v2/catalog/items"
-        params = {"search_text": term, "order": "newest_first", "per_page": 30, "page": 1}
-        headers = {"Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9"}
+        url = f"https://www.vinted.{self.tld}/catalog"
+        params = {"search_text": term, "order": "newest_first"}
+        headers = {"Accept": "text/html,application/xhtml+xml"}
         for attempt in (1, 2):
             r = await self.get(url, params=params, headers=headers)
-            if r.status_code in (401, 403) and attempt == 1:
+            if r.status_code in (401, 403, 429) and attempt == 1:
                 await self._refresh()
                 continue
             r.raise_for_status()
             break
-        out = []
-        for it in r.json().get("items", []):
-            p = it.get("price")
-            if isinstance(p, dict):
-                amount, cur = float(p.get("amount", 0)), p.get("currency_code", self.currency)
-            else:
-                amount, cur = float(p or 0), self.currency
-            title = it.get("title", "")
-            extra = " · ".join(x for x in (it.get("brand_title"), it.get("size_title")) if x)
-            if extra:
-                title = f"{title} ({extra})"
+        page = r.text
+        out, done = [], set()
+        for m in re.finditer(r'<a\b[^>]*?href="(/items/(\d+)[^"]*)"[^>]*?>', page):
+            tag, gid = m.group(0), m.group(2)
+            if gid in done:
+                continue
+            tm = re.search(r'\btitle="([^"]*)"', tag)
+            if not tm:
+                continue
+            full = htmllib.unescape(tm.group(1))
+            parts = full.rsplit(", ", 2)
+            if len(parts) < 3:
+                continue
+            name, price_s = parts[0], parts[1]
+            pm = re.search(r"\d[\d\s\u00a0]*(?:[.,]\d+)?", price_s)
+            if not pm:
+                continue
+            num = re.sub(r"[\s\u00a0]", "", pm.group(0)).replace(",", ".")
+            try:
+                price = float(num)
+            except ValueError:
+                continue
+            done.add(gid)
+            photo = None
+            im = re.search(r'<img\b[^>]*product-item-id-%s--image--img[^>]*>' % gid, page)
+            if im:
+                sm = re.search(r'\bsrc="([^"]+)"', im.group(0))
+                if sm:
+                    photo = htmllib.unescape(sm.group(1))
             out.append(
                 Item(
                     self.code,
-                    str(it["id"]),
-                    title,
-                    amount,
-                    cur,
-                    it.get("url") or f"https://www.vinted.{self.tld}/items/{it['id']}",
-                    (it.get("photo") or {}).get("url"),
+                    gid,
+                    name[:200],
+                    price,
+                    self.currency,
+                    f"https://www.vinted.{self.tld}{m.group(1).split('?')[0]}",
+                    photo,
                 )
             )
+        if not out:
+            logging.getLogger("vinted").warning("%s '%s': ничего не найдено", self.tld, term)
         return out
 
 
