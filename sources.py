@@ -304,7 +304,9 @@ class SecondStreet(Source):
 
         url = "https://www.2ndstreet.jp/search"
         kw = dict(params={"keyword": term, "sortBy": "arrival"}, headers={"Accept-Language": "ja,en;q=0.8"})
+        self.trace = []
         r = await self.get(url, **kw)
+        self.trace.append(f"1) страница: HTTP {r.status_code}, {len(r.text)} симв.")
         for _ in range(3):
             t = r.text
             if "_sec/verify" not in t:
@@ -321,6 +323,7 @@ class SecondStreet(Source):
                 json={"bm-verify": mt.group(1), "pow": pow_},
                 headers={"Content-Type": "application/json", "Referer": str(url)},
             )
+            self.trace.append(f"2) проверка: HTTP {vr.status_code}, ответ: {vr.text[:200]!r}")
             try:
                 data = vr.json()
             except Exception:
@@ -329,6 +332,9 @@ class SecondStreet(Source):
                 r = await self.get(data["location"])
             else:
                 r = await self.get(url, **kw)
+            self.trace.append(f"3) после проверки: HTTP {r.status_code}, {len(r.text)} симв.")
+        if r.status_code >= 400:
+            self.trace.append(f"тело: {' '.join(r.text.split())[:300]!r}")
         return r
 
     async def diag(self, term: str) -> str:
@@ -350,6 +356,7 @@ class SecondStreet(Source):
                 f"встроенный код: {' '.join(' '.join(inline).split())[:600] or 'нет'}"
             )
         return (
+            "\n".join(getattr(self, "trace", [])) + "\n"
             f"HTTP {r.status_code}, {len(t)} симв.\n"
             f"goodsId: {t.count('goodsId')}, /goods/: {t.count('/goods/')}, "
             f"¥: {t.count('¥')}, 円: {t.count('円')}\n"
