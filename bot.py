@@ -383,7 +383,7 @@ async def peek(m: Message, command: CommandObject):
             except Exception as e:
                 text = f"Ошибка: {e!r}"
             return await m.answer(html.escape(text)[:3800])
-    await m.answer("Формат: /peek 2nd или /peek vinted")
+    await m.answer("Формат: /peek bunjang, /peek fruits, /peek vinted или /peek 2nd")
 
 
 # ---------- любой текст = новый бренд

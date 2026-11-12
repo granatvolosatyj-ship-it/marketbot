@@ -289,49 +289,145 @@ class MercariJP(Source):
         return out
 
 
+# ------------------------------------------- Общий разбор HTML-страниц с карточками
+class CardSource(Source):
+    """Площадки, у которых страница поиска сразу отдаёт товары в HTML (Bunjang, Fruits Family).
+    Ищем ссылки на товары, рядом цену в вонах, название и картинку."""
+
+    impersonate = True
+    currency = "KRW"
+    lang = "ko"
+    link_re = None  # group(1) = ссылка, group(2) = id товара
+    base = ""
+
+    async def fetch(self, term: str):
+        raise NotImplementedError
+
+    def full_url(self, href: str) -> str:
+        import html as htmllib
+
+        href = htmllib.unescape(href)
+        return href if href.startswith("http") else self.base + href
+
+    def parse(self, page: str) -> list[Item]:
+        import html as htmllib
+        import re
+
+        matches = [(max(0, page.rfind("<", 0, m.start())), m.group(1), m.group(2)) for m in self.link_re.finditer(page)]
+        out, done = [], set()
+        for i, (pos, href, gid) in enumerate(matches):
+            if gid in done:
+                continue
+            done.add(gid)
+            j = i + 1
+            while j < len(matches) and matches[j][2] == gid:
+                j += 1
+            end = matches[j][0] if j < len(matches) else pos + 3500
+            chunk = page[pos : min(end, pos + 3500)]
+            pm = re.search(r"(\d{1,3}(?:,\d{3})+|\d{3,})\s*원", chunk)
+            if not pm:
+                continue
+            price = float(pm.group(1).replace(",", ""))
+            title = ""
+            for alt in re.findall(r'alt="([^"]*)"', chunk):
+                alt = htmllib.unescape(alt).strip()
+                if len(alt) >= 3 and "상품 이미지" not in alt:
+                    title = alt
+                    break
+            if not title:
+                txt = " ".join(re.sub(r"<[^>]+>", " ", chunk[: pm.start()]).split())
+                txt = htmllib.unescape(txt.replace("상품 이미지", " "))
+                words = txt.split()
+                n = len(words)
+                if n % 2 == 0 and n and words[: n // 2] == words[n // 2 :]:
+                    words = words[: n // 2]  # название часто написано дважды
+                title = " ".join(words)[:200]
+            photo = None
+            for im in re.finditer(r"<img\b[^>]*>", chunk):
+                tag = im.group(0)
+                sm = re.search(r'(?:data-src|src)="([^"]+)"', tag)
+                if not sm or sm.group(1).startswith("data:") or ".svg" in sm.group(1):
+                    continue
+                u = htmllib.unescape(sm.group(1))
+                if "/_next/image" in u:
+                    from urllib.parse import parse_qs, unquote, urlparse
+
+                    q = parse_qs(urlparse(u).query).get("url")
+                    if q:
+                        u = unquote(q[0])
+                if u.startswith("//"):
+                    u = "https:" + u
+                if u.startswith("http"):
+                    photo = u
+                    break
+            out.append(Item(self.code, gid, title or "Товар", price, "KRW", self.full_url(href), photo))
+        return out
+
+    async def search(self, term: str) -> list[Item]:
+        import logging
+
+        r = await self.fetch(term)
+        if r.status_code == 404:
+            return []  # такого бренда/запроса на площадке нет
+        r.raise_for_status()
+        out = self.parse(r.text)
+        if not out:
+            logging.getLogger(self.code).warning("'%s': ничего не найдено (вёрстка могла измениться)", term)
+        return out
+
+    async def diag(self, term: str) -> str:
+        r = await self.fetch(term)
+        t = r.text
+        links = len(self.link_re.findall(t))
+        items = self.parse(t)
+        lines = [f"HTTP {r.status_code}, {len(t)} симв., ссылок на товары: {links}, разобрано: {len(items)}"]
+        for it in items[:3]:
+            lines.append(f"• {it.title[:60]} | {it.price:,.0f} ₩ | фото: {'есть' if it.photo else 'нет'} | {it.url}")
+        m = self.link_re.search(t)
+        if m:
+            lines.append("Фрагмент: " + " ".join(t[max(0, m.start() - 100): m.start() + 700].split()))
+        else:
+            lines.append("Начало страницы: " + " ".join(t[:500].split()))
+        return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- Bunjang
-class Bunjang(Source):
+class Bunjang(CardSource):
     code = "bunjang"
     label = "Bunjang"
     flag = "🇰🇷"
-    currency = "KRW"
-    lang = "ko"
+    base = "https://m.bunjang.co.kr"
+    link_re = __import__("re").compile(r'href="((?:https://m\.bunjang\.co\.kr)?/products/(\d+)[^"]*)"')
 
-    async def search(self, term: str) -> list[Item]:
-        r = await self.client.get(
-            "https://api.bunjang.co.kr/api/1/find_v2.json",
-            params={
-                "q": term,
-                "order": "date",
-                "page": 0,
-                "request_id": str(int(time.time() * 1000)),
-                "stat_device": "w",
-                "n": 100,
-                "stat_category_required": 1,
-                "req_ref": "search",
-                "version": 4,
-            },
-            headers={"Referer": "https://m.bunjang.co.kr/"},
+    async def fetch(self, term: str):
+        """Сначала поиск с сортировкой «новые», запасной вариант: страница ключевого слова."""
+        from urllib.parse import quote
+
+        h = {"Accept": "text/html,application/xhtml+xml", "Accept-Language": "ko,en;q=0.8"}
+        r = await self.get(f"{self.base}/search/products", params={"q": term, "order": "date"}, headers=h)
+        if r.status_code == 200 and self.parse(r.text):
+            return r
+        r2 = await self.get(f"{self.base}/keywords/{quote(term)}", headers=h)
+        return r2 if r2.status_code == 200 or r.status_code != 200 else r
+
+
+# ---------------------------------------------------------------- Fruits Family
+class FruitsFamily(CardSource):
+    code = "fruits_kr"
+    label = "Fruits Family"
+    flag = "🇰🇷"
+    base = "https://fruitsfamily.com"
+    link_re = __import__("re").compile(r'href="((?:https://fruitsfamily\.com)?/product/([A-Za-z0-9]+)[^"]*)"')
+
+    async def fetch(self, term: str):
+        from urllib.parse import quote
+
+        # страница бренда с сортировкой «новые»; название бренда пишется с заглавных букв
+        return await self.get(
+            f"{self.base}/brand/{quote(term.title())}",
+            params={"sort": "NEW"},
+            headers={"Accept": "text/html,application/xhtml+xml", "Accept-Language": "ko,en;q=0.8"},
         )
-        r.raise_for_status()
-        out = []
-        for it in r.json().get("list", []):
-            if it.get("ad") or not it.get("pid"):
-                continue
-            img = it.get("product_image") or ""
-            img = img.replace("{cnt}", "1").replace("{res}", "300") or None
-            out.append(
-                Item(
-                    self.code,
-                    str(it["pid"]),
-                    it.get("name", ""),
-                    float(it.get("price") or 0),
-                    "KRW",
-                    f"https://m.bunjang.co.kr/products/{it['pid']}",
-                    img,
-                )
-            )
-        return out
 
 
 # ---------------------------------------------------------------- 2nd STREET JP
@@ -480,10 +576,9 @@ VINTED_DOMAINS = [
 
 def build_sources() -> list[Source]:
     s: list[Source] = [Vinted(*d) for d in VINTED_DOMAINS]
-    s += [MercariJP(), Bunjang(), SecondStreet()]
+    s += [MercariJP(), Bunjang(), FruitsFamily(), SecondStreet()]
     # В разработке: запросы этих площадок ещё не изучены
     s += [
-        NotReady("fruits_kr", "Fruits Family", "🇰🇷", "KRW", "ko"),
         NotReady("95_cn", "95分", "🇨🇳", "CNY"),
     ]
     return s
