@@ -85,13 +85,16 @@ async def process(db: DB, bot: Bot, rates: Rates, source: Source, brand: str, qu
     if first_time:
         db.set_baselined(source.code, query)  # старые объявления не шлём
         for i in new:
-            for uid in users:
+            for uid, _ in users:
                 db.claim_sent(uid, dedup_key(source, i))
         return
     for i in list(reversed(new))[-MAX_PER_TERM:]:  # от старых к новым
         caption = format_caption(i, source, brand, rates)
         key = dedup_key(source, i)
-        for uid in users:
+        rub = rates.to_rub(i.price, i.currency)
+        for uid, limit in users:
+            if limit and rub is not None and rub > limit:
+                continue  # дороже лимита цены
             if db.claim_sent(uid, key):  # одно и то же объявление в другой стране/по другому бренду не шлём
                 await send(bot, uid, i, caption)
 

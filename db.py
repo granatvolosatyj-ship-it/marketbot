@@ -22,6 +22,15 @@ class DB:
                 source TEXT, term TEXT, PRIMARY KEY(source, term));
             """
         )
+        for stmt in (
+            "ALTER TABLE users ADD COLUMN paused INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN max_rub REAL",
+            "ALTER TABLE subs ADD COLUMN max_rub REAL",
+        ):
+            try:  # миграция старой базы: если колонка уже есть, это нормально
+                self.c.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         self.c.commit()
 
     # users
@@ -49,7 +58,29 @@ class DB:
         self.c.commit()
 
     def user_subs(self, uid: int):
-        return self.c.execute("SELECT id, brand FROM subs WHERE user_id=? ORDER BY id", (uid,)).fetchall()
+        return self.c.execute("SELECT id, brand, max_rub FROM subs WHERE user_id=? ORDER BY id", (uid,)).fetchall()
+
+    # пауза и лимиты цены (в рублях)
+    def set_paused(self, uid: int, paused: bool):
+        self.c.execute("UPDATE users SET paused=? WHERE id=?", (int(paused), uid))
+        self.c.commit()
+
+    def is_paused(self, uid: int) -> bool:
+        r = self.c.execute("SELECT paused FROM users WHERE id=?", (uid,)).fetchone()
+        return bool(r and r["paused"])
+
+    def set_global_limit(self, uid: int, rub: float | None):
+        self.c.execute("UPDATE users SET max_rub=? WHERE id=?", (rub, uid))
+        self.c.commit()
+
+    def global_limit(self, uid: int) -> float | None:
+        r = self.c.execute("SELECT max_rub FROM users WHERE id=?", (uid,)).fetchone()
+        return r["max_rub"] if r else None
+
+    def set_brand_limit(self, uid: int, brand: str, rub: float | None) -> bool:
+        cur = self.c.execute("UPDATE subs SET max_rub=? WHERE user_id=? AND brand=?", (rub, uid, brand))
+        self.c.commit()
+        return cur.rowcount > 0
 
     # sources on/off
     def disabled_sources(self, uid: int) -> set[str]:
@@ -67,20 +98,22 @@ class DB:
     def active_terms(self, source: str) -> list[str]:
         rows = self.c.execute(
             """SELECT DISTINCT s.brand FROM subs s JOIN users u ON u.id=s.user_id
-               WHERE u.allowed=1 AND NOT EXISTS
+               WHERE u.allowed=1 AND COALESCE(u.paused,0)=0 AND NOT EXISTS
                (SELECT 1 FROM disabled d WHERE d.user_id=s.user_id AND d.source=?)""",
             (source,),
         ).fetchall()
         return [r["brand"] for r in rows]
 
-    def subscribers(self, brand: str, source: str) -> list[int]:
+    def subscribers(self, brand: str, source: str) -> list[tuple[int, float | None]]:
+        """(id пользователя, лимит цены в ₽ или None). Остановленные (/stop) не включаются."""
         rows = self.c.execute(
-            """SELECT DISTINCT s.user_id FROM subs s JOIN users u ON u.id=s.user_id
-               WHERE s.brand=? AND u.allowed=1 AND NOT EXISTS
+            """SELECT s.user_id, COALESCE(s.max_rub, u.max_rub) AS lim
+               FROM subs s JOIN users u ON u.id=s.user_id
+               WHERE s.brand=? AND u.allowed=1 AND COALESCE(u.paused,0)=0 AND NOT EXISTS
                (SELECT 1 FROM disabled d WHERE d.user_id=s.user_id AND d.source=?)""",
             (brand, source),
         ).fetchall()
-        return [r["user_id"] for r in rows]
+        return [(r["user_id"], r["lim"]) for r in rows]
 
     # seen / baseline
     def is_baselined(self, source: str, term: str) -> bool:

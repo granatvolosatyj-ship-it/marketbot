@@ -26,6 +26,9 @@ HELP = (
     "с этого момента.\n\n"
     "/list: мои бренды (можно удалить)\n"
     "/countries: включить или выключить страны и площадки\n"
+    "/limit: поставить лимит цены (бот спросит сумму в рублях)\n"
+    "/stop: поставить уведомления на паузу\n"
+    "/resume: снова включить\n"
     "/help: эта подсказка"
 )
 ADMIN_HELP = "\n\nАдмин:\n/allow ID: дать доступ\n/deny ID: забрать доступ\n/users: список"
@@ -41,10 +44,135 @@ async def deny(m: Message):
 
 
 @router.message(Command("start", "help"))
-async def start(m: Message):
+async def start(m: Message, command: CommandObject):
     if not has_access(m.from_user.id):
         return await deny(m)
+    if command.command == "start" and db.is_paused(m.from_user.id):
+        db.set_paused(m.from_user.id, False)
+        await m.answer("▶️ Уведомления снова включены.")
     await m.answer(HELP + (ADMIN_HELP if m.from_user.id == config.ADMIN_ID else ""))
+
+
+def sub_label(s) -> str:
+    lim = f" (до {s['max_rub']:,.0f} ₽)".replace(",", " ") if s["max_rub"] else ""
+    return f"❌ {s['brand']}{lim}"
+
+
+def parse_amount(text: str) -> float | None:
+    """«5000», «5 000», «5к», «5000₽» -> число; None, если не число."""
+    import re
+
+    t = text.lower().replace(" ", "").replace("\u00a0", "").replace("₽", "").replace("руб", "").rstrip("р.")
+    m = re.fullmatch(r"(\d+(?:[.,]\d+)?)([kк]?)", t)
+    if not m:
+        return None
+    v = float(m.group(1).replace(",", "."))
+    return v * 1000 if m.group(2) else v
+
+
+@router.message(Command("stop"))
+async def stop(m: Message):
+    if not has_access(m.from_user.id):
+        return await deny(m)
+    db.set_paused(m.from_user.id, True)
+    await m.answer(
+        "⏸ Уведомления остановлены. Пока пауза, объявления не копятся: когда включишь снова, "
+        "придёт только то, что появится после.\n/resume: включить"
+    )
+
+
+@router.message(Command("resume"))
+async def resume(m: Message):
+    if not has_access(m.from_user.id):
+        return await deny(m)
+    db.set_paused(m.from_user.id, False)
+    await m.answer("▶️ Уведомления включены. Пришлю то, что появится с этого момента.")
+
+
+pending: dict[int, str] = {}  # кто сейчас вводит сумму лимита: "all" или название бренда
+
+
+@router.callback_query(F.data.startswith("lim:"))
+async def limit_pick(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    what = c.data.split(":", 1)[1]
+    if what == "all":
+        pending[c.from_user.id] = "all"
+        target = "всех брендов"
+    else:
+        sub = next((s for s in db.user_subs(c.from_user.id) if str(s["id"]) == what), None)
+        if not sub:
+            return await c.answer("Бренд уже удалён")
+        pending[c.from_user.id] = sub["brand"]
+        target = html.escape(sub["brand"])
+    await c.answer()
+    await c.message.answer(
+        f"Напиши максимальную цену в рублях для {target}. Например: <b>5000</b>\n"
+        "Чтобы убрать лимит, напиши <b>off</b>. Отмена: /cancel"
+    )
+
+
+@router.message(Command("cancel"))
+async def cancel(m: Message):
+    pending.pop(m.from_user.id, None)
+    await m.answer("Отменено.")
+
+
+async def apply_limit(m: Message, what: str):
+    uid = m.from_user.id
+    t = m.text.strip().lower()
+    off = t in ("off", "выкл", "нет", "0")
+    amount = None if off else parse_amount(t)
+    if not off and amount is None:
+        return await m.answer("Не понял. Напиши число, например 5000, или off, чтобы убрать лимит. Отмена: /cancel")
+    pending.pop(uid, None)
+    if what == "all":
+        db.set_global_limit(uid, amount)
+        who = "всех брендов"
+    else:
+        db.set_brand_limit(uid, what, amount)
+        who = html.escape(what)
+    await m.answer(
+        f"Лимит для {who} снят ✅" if off else f"Для {who}: не дороже {amount:,.0f} ₽ ✅".replace(",", " ")
+    )
+
+
+@router.message(Command("limit"))
+async def limit(m: Message, command: CommandObject):
+    if not has_access(m.from_user.id):
+        return await deny(m)
+    uid = m.from_user.id
+    args = (command.args or "").strip()
+    if not args:
+        pending.pop(uid, None)
+        g = db.global_limit(uid)
+        lines = [f"Общий лимит: {f'{g:,.0f} ₽'.replace(',', ' ') if g else 'нет'}"]
+        for s in db.user_subs(uid):
+            if s["max_rub"]:
+                lines.append(f"{s['brand']}: до {s['max_rub']:,.0f} ₽".replace(",", " "))
+        lines.append("\nДля чего поставить лимит? Нажми кнопку, потом напиши сумму в рублях.")
+        rows = [[InlineKeyboardButton(text="🌐 Для всех брендов", callback_data="lim:all")]]
+        rows += [[InlineKeyboardButton(text=f"💰 {s['brand']}", callback_data=f"lim:{s['id']}")] for s in db.user_subs(uid)]
+        return await m.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    parts = args.split()
+    last = parts[-1].lower()
+    off = last in ("off", "выкл", "нет", "0")
+    amount = None if off else parse_amount(parts[-1])
+    if not off and amount is None:
+        return await m.answer("Не понял сумму. Пример: /limit 5000 или /limit nike 3000 или /limit off")
+    if len(parts) == 1:  # общий лимит
+        db.set_global_limit(uid, amount)
+        return await m.answer(
+            "Лимит снят ✅" if off else f"Не буду присылать дороже {amount:,.0f} ₽ ✅".replace(",", " ")
+        )
+    brand = " ".join(" ".join(parts[:-1]).lower().split())
+    if not db.set_brand_limit(uid, brand, amount):
+        return await m.answer(f"Бренда «{html.escape(brand)}» нет в твоём списке (/list).")
+    await m.answer(
+        f"Для {html.escape(brand)} лимит снят ✅" if off
+        else f"{html.escape(brand)}: не дороже {amount:,.0f} ₽ ✅".replace(",", " ")
+    )
 
 
 # ---------- бренды
@@ -56,7 +184,7 @@ async def list_subs(m: Message):
     if not subs:
         return await m.answer("Брендов пока нет. Напиши название бренда.")
     kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=f"❌ {s['brand']}", callback_data=f"del:{s['id']}")] for s in subs]
+        inline_keyboard=[[InlineKeyboardButton(text=sub_label(s), callback_data=f"del:{s['id']}")] for s in subs]
     )
     await m.answer("Твои бренды (нажми, чтобы удалить):", reply_markup=kb)
 
@@ -68,7 +196,7 @@ async def del_sub(c: CallbackQuery):
     db.del_sub(c.from_user.id, int(c.data.split(":")[1]))
     subs = db.user_subs(c.from_user.id)
     kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=f"❌ {s['brand']}", callback_data=f"del:{s['id']}")] for s in subs]
+        inline_keyboard=[[InlineKeyboardButton(text=sub_label(s), callback_data=f"del:{s['id']}")] for s in subs]
     )
     await c.message.edit_text("Твои бренды (нажми, чтобы удалить):" if subs else "Список пуст.", reply_markup=kb if subs else None)
     await c.answer("Удалено")
@@ -263,6 +391,8 @@ async def peek(m: Message, command: CommandObject):
 async def add_brand(m: Message):
     if not has_access(m.from_user.id):
         return await deny(m)
+    if m.from_user.id in pending:
+        return await apply_limit(m, pending[m.from_user.id])
     brand = " ".join(m.text.lower().split())[:50]
     if db.add_sub(m.from_user.id, brand):
         await m.answer(
