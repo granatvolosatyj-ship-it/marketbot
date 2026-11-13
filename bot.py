@@ -24,8 +24,8 @@ router = Router()
 HELP = (
     "Просто напиши название бренда (например <b>Nike</b>), и я начну присылать новые объявления "
     "с этого момента.\n\n"
-    "/list: мои бренды (можно удалить)\n"
-    "/countries: включить или выключить страны и площадки\n"
+    "/list: мои бренды: выбрать, на каких площадках искать каждый бренд, или удалить\n"
+    "/countries: включить или выключить площадки сразу для всех брендов\n"
     "/limit: поставить лимит цены (бот спросит сумму в рублях)\n"
     "/stop: поставить уведомления на паузу\n"
     "/resume: снова включить\n"
@@ -176,17 +176,73 @@ async def limit(m: Message, command: CommandObject):
 
 
 # ---------- бренды
+def where_text(off: set[str]) -> str:
+    on = [s for s in ready if s.code not in off]
+    if len(on) == len(ready):
+        return "везде"
+    if not on:
+        return "нигде"
+    if all(s.code.startswith("vinted_") for s in on) and len(on) == sum(s.code.startswith("vinted_") for s in ready):
+        return "только Vinted"
+    if not any(s.code.startswith("vinted_") for s in on):
+        return f"Азия ({len(on)})"
+    return f"{len(on)} из {len(ready)}"
+
+
+def list_kb(uid: int) -> InlineKeyboardMarkup:
+    rows = []
+    for s in db.user_subs(uid):
+        lim = f" · до {s['max_rub']:,.0f} ₽".replace(",", " ") if s["max_rub"] else ""
+        text = f"⚙️ {s['brand']}{lim} · {where_text(db.brand_disabled(s['id']))}"
+        rows.append(
+            [
+                InlineKeyboardButton(text=text[:60], callback_data=f"bs:{s['id']}"),
+                InlineKeyboardButton(text="🗑", callback_data=f"del:{s['id']}"),
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+LIST_TEXT = "Твои бренды. ⚙️ выбрать, где искать (страны и площадки), 🗑 удалить:"
+
+
+def brand_kb(sub_id: int) -> InlineKeyboardMarkup:
+    off = db.brand_disabled(sub_id)
+    rows, row = [], []
+    for s in ready:
+        mark = "❌" if s.code in off else "✅"
+        row.append(InlineKeyboardButton(text=f"{mark} {s.flag} {s.label}", callback_data=f"bt:{sub_id}:{s.code}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [
+            InlineKeyboardButton(text="🌍 Везде", callback_data=f"bp:{sub_id}:all"),
+            InlineKeyboardButton(text="🇪🇺 Только Vinted", callback_data=f"bp:{sub_id}:eu"),
+            InlineKeyboardButton(text="🇯🇵🇰🇷 Только Азия", callback_data=f"bp:{sub_id}:asia"),
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="⬅️ К списку брендов", callback_data="bl")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def brand_text(sub) -> str:
+    return (
+        f"Где искать <b>{html.escape(sub['brand'])}</b>?\n"
+        "✅ ищу, ❌ не ищу. Нажимай на площадку, чтобы включить или выключить. "
+        "Другие бренды настраиваются отдельно."
+    )
+
+
 @router.message(Command("list"))
 async def list_subs(m: Message):
     if not has_access(m.from_user.id):
         return await deny(m)
-    subs = db.user_subs(m.from_user.id)
-    if not subs:
+    if not db.user_subs(m.from_user.id):
         return await m.answer("Брендов пока нет. Напиши название бренда.")
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=sub_label(s), callback_data=f"del:{s['id']}")] for s in subs]
-    )
-    await m.answer("Твои бренды (нажми, чтобы удалить):", reply_markup=kb)
+    await m.answer(LIST_TEXT, reply_markup=list_kb(m.from_user.id))
 
 
 @router.callback_query(F.data.startswith("del:"))
@@ -195,11 +251,64 @@ async def del_sub(c: CallbackQuery):
         return await c.answer()
     db.del_sub(c.from_user.id, int(c.data.split(":")[1]))
     subs = db.user_subs(c.from_user.id)
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=sub_label(s), callback_data=f"del:{s['id']}")] for s in subs]
-    )
-    await c.message.edit_text("Твои бренды (нажми, чтобы удалить):" if subs else "Список пуст.", reply_markup=kb if subs else None)
+    await c.message.edit_text(LIST_TEXT if subs else "Список пуст.", reply_markup=list_kb(c.from_user.id) if subs else None)
     await c.answer("Удалено")
+
+
+@router.callback_query(F.data == "bl")
+async def brands_back(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    subs = db.user_subs(c.from_user.id)
+    await c.message.edit_text(LIST_TEXT if subs else "Список пуст.", reply_markup=list_kb(c.from_user.id) if subs else None)
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("bs:"))
+async def brand_open(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    sub = db.get_sub(c.from_user.id, int(c.data.split(":")[1]))
+    if not sub:
+        return await c.answer("Бренд уже удалён")
+    await c.message.edit_text(brand_text(sub), reply_markup=brand_kb(sub["id"]))
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("bt:"))
+async def brand_toggle(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    _, sid, code = c.data.split(":", 2)
+    sub = db.get_sub(c.from_user.id, int(sid))
+    if not sub or code not in {s.code for s in ready}:
+        return await c.answer()
+    off = db.brand_disabled(sub["id"])
+    now_on = code in off
+    off.symmetric_difference_update({code})
+    db.set_brand_sources(sub["id"], off)
+    await c.message.edit_reply_markup(reply_markup=brand_kb(sub["id"]))
+    await c.answer("Включено ✅" if now_on else "Выключено ❌")  # сразу убирает «часики»
+
+
+@router.callback_query(F.data.startswith("bp:"))
+async def brand_preset(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    _, sid, kind = c.data.split(":")
+    sub = db.get_sub(c.from_user.id, int(sid))
+    if not sub:
+        return await c.answer()
+    codes = [s.code for s in ready]
+    if kind == "eu":
+        off = {x for x in codes if not x.startswith("vinted_")}
+    elif kind == "asia":
+        off = {x for x in codes if x.startswith("vinted_")}
+    else:
+        off = set()
+    db.set_brand_sources(sub["id"], off)
+    await c.message.edit_reply_markup(reply_markup=brand_kb(sub["id"]))
+    await c.answer("Готово ✅")
 
 
 # ---------- страны
@@ -395,9 +504,11 @@ async def add_brand(m: Message):
         return await apply_limit(m, pending[m.from_user.id])
     brand = " ".join(m.text.lower().split())[:50]
     if db.add_sub(m.from_user.id, brand):
+        sub = next(s for s in db.user_subs(m.from_user.id) if s["brand"] == brand)
         await m.answer(
-            f"Ищу <b>{html.escape(brand)}</b>. Пришлю только то, что появится с этого момента.\n"
-            "Страны: /countries"
+            f"Ищу <b>{html.escape(brand)}</b> везде. Пришлю только то, что появится с этого момента.\n\n"
+            "Если нужны не все площадки, выключи лишние ниже (✅ ищу, ❌ не ищу):",
+            reply_markup=brand_kb(sub["id"]),
         )
     else:
         await m.answer("Этот бренд уже в списке.")

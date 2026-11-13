@@ -16,6 +16,8 @@ class DB:
                 user_id INTEGER, source TEXT, PRIMARY KEY(user_id, source));
             CREATE TABLE IF NOT EXISTS seen(
                 source TEXT, item_id TEXT, PRIMARY KEY(source, item_id));
+            CREATE TABLE IF NOT EXISTS sub_disabled(
+                sub_id INTEGER, source TEXT, PRIMARY KEY(sub_id, source));
             CREATE TABLE IF NOT EXISTS sent(
                 user_id INTEGER, key TEXT, PRIMARY KEY(user_id, key));
             CREATE TABLE IF NOT EXISTS baselined(
@@ -54,7 +56,24 @@ class DB:
         return cur.rowcount > 0
 
     def del_sub(self, uid: int, sub_id: int):
+        self.c.execute("DELETE FROM sub_disabled WHERE sub_id IN (SELECT id FROM subs WHERE id=? AND user_id=?)", (sub_id, uid))
         self.c.execute("DELETE FROM subs WHERE id=? AND user_id=?", (sub_id, uid))
+        self.c.commit()
+
+    # площадки отдельно для каждого бренда
+    def get_sub(self, uid: int, sub_id: int):
+        return self.c.execute(
+            "SELECT id, brand, max_rub FROM subs WHERE id=? AND user_id=?", (sub_id, uid)
+        ).fetchone()
+
+    def brand_disabled(self, sub_id: int) -> set[str]:
+        rows = self.c.execute("SELECT source FROM sub_disabled WHERE sub_id=?", (sub_id,)).fetchall()
+        return {r["source"] for r in rows}
+
+    def set_brand_sources(self, sub_id: int, off: set[str]):
+        """Сохраняет, на каких площадках этот бренд ВЫКЛЮЧЕН."""
+        self.c.execute("DELETE FROM sub_disabled WHERE sub_id=?", (sub_id,))
+        self.c.executemany("INSERT INTO sub_disabled(sub_id, source) VALUES(?,?)", [(sub_id, c) for c in off])
         self.c.commit()
 
     def user_subs(self, uid: int):
@@ -98,9 +117,10 @@ class DB:
     def active_terms(self, source: str) -> list[str]:
         rows = self.c.execute(
             """SELECT DISTINCT s.brand FROM subs s JOIN users u ON u.id=s.user_id
-               WHERE u.allowed=1 AND COALESCE(u.paused,0)=0 AND NOT EXISTS
-               (SELECT 1 FROM disabled d WHERE d.user_id=s.user_id AND d.source=?)""",
-            (source,),
+               WHERE u.allowed=1 AND COALESCE(u.paused,0)=0
+               AND NOT EXISTS (SELECT 1 FROM disabled d WHERE d.user_id=s.user_id AND d.source=?)
+               AND NOT EXISTS (SELECT 1 FROM sub_disabled sd WHERE sd.sub_id=s.id AND sd.source=?)""",
+            (source, source),
         ).fetchall()
         return [r["brand"] for r in rows]
 
@@ -109,9 +129,10 @@ class DB:
         rows = self.c.execute(
             """SELECT s.user_id, COALESCE(s.max_rub, u.max_rub) AS lim
                FROM subs s JOIN users u ON u.id=s.user_id
-               WHERE s.brand=? AND u.allowed=1 AND COALESCE(u.paused,0)=0 AND NOT EXISTS
-               (SELECT 1 FROM disabled d WHERE d.user_id=s.user_id AND d.source=?)""",
-            (brand, source),
+               WHERE s.brand=? AND u.allowed=1 AND COALESCE(u.paused,0)=0
+               AND NOT EXISTS (SELECT 1 FROM disabled d WHERE d.user_id=s.user_id AND d.source=?)
+               AND NOT EXISTS (SELECT 1 FROM sub_disabled sd WHERE sd.sub_id=s.id AND sd.source=?)""",
+            (brand, source, source),
         ).fetchall()
         return [(r["user_id"], r["lim"]) for r in rows]
 

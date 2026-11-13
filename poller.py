@@ -126,7 +126,9 @@ async def poll_source_once(db: DB, bot: Bot, rates: Rates, source: Source) -> tu
 async def source_loop(db: DB, bot: Bot, rates: Rates, source: Source, end: float | None = None):
     """Бесконечный цикл (VPS) или цикл до момента end (GitHub Actions)."""
     backoff = 0
-    await asyncio.sleep(random.uniform(0, 5))
+    interval = getattr(source, "interval", None) or config.POLL_INTERVAL
+    # разносим старт площадок по времени, чтобы запросы не шли пачкой
+    await asyncio.sleep(random.uniform(0, min(interval, 60) if getattr(source, "interval", None) else 5))
     while True:
         try:
             ok, fail = await poll_source_once(db, bot, rates, source)
@@ -136,7 +138,7 @@ async def source_loop(db: DB, bot: Bot, rates: Rates, source: Source, end: float
             log.warning("%s: ошибка %s, пауза %ss", source.code, e, backoff)
         if end is not None and time.monotonic() >= end:
             break
-        await asyncio.sleep(config.POLL_INTERVAL + backoff + random.uniform(0, 3))
+        await asyncio.sleep(interval + backoff + random.uniform(0, 3))
 
 
 async def run_poller(db: DB, bot: Bot, rates: Rates, sources: list[Source]):

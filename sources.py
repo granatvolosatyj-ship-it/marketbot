@@ -1,6 +1,7 @@
 """Площадки. Каждая отдаёт список новых объявлений (сначала самые свежие)."""
 import base64
 import json
+import random
 import time
 import uuid
 from dataclasses import dataclass
@@ -84,6 +85,8 @@ class Source:
 # ---------------------------------------------------------------- Vinted
 class Vinted(Source):
     impersonate = True
+    interval = 75  # секунд между проверками (чаще Vinted блокирует: ошибка 429)
+    _sem = None
 
     async def diag(self, term: str) -> str:
         """Диагностика для команды /peek: что отвечает сайт."""
@@ -117,6 +120,8 @@ class Vinted(Source):
         self.flag = flag
         self.currency = currency
         self._has_cookie = False
+        self._cool_until = 0.0
+        self._cool_n = 0
 
     async def _refresh(self):
         (self.cffi or self.client).cookies.clear()
@@ -133,18 +138,31 @@ class Vinted(Source):
         import logging
         import re
 
-        if not self._has_cookie:
-            await self._refresh()
+        import asyncio
+
+        left = self._cool_until - time.monotonic()
+        if left > 0:
+            raise RuntimeError(f"Vinted просит не частить, пауза ещё {int(left)} с")
+        if Vinted._sem is None:
+            Vinted._sem = asyncio.Semaphore(3)  # не больше 3 запросов к Vinted одновременно
         url = f"https://www.vinted.{self.tld}/catalog"
         params = {"search_text": term, "order": "newest_first"}
         headers = {"Accept": "text/html,application/xhtml+xml"}
-        for attempt in (1, 2):
-            r = await self.get(url, params=params, headers=headers)
-            if r.status_code in (401, 403, 429) and attempt == 1:
+        async with Vinted._sem:
+            await asyncio.sleep(random.uniform(0.2, 0.8))
+            if not self._has_cookie:
                 await self._refresh()
-                continue
-            r.raise_for_status()
-            break
+            r = await self.get(url, params=params, headers=headers)
+            if r.status_code in (401, 403):
+                await self._refresh()
+                r = await self.get(url, params=params, headers=headers)
+        if r.status_code == 429:
+            self._cool_n += 1
+            pause = min(60 * 2 ** (self._cool_n - 1), 600)  # 60, 120, 240, 480, 600 с
+            self._cool_until = time.monotonic() + pause
+            raise RuntimeError(f"HTTP 429: Vinted просит не частить, пауза {pause} с")
+        r.raise_for_status()
+        self._cool_n = 0
         page = r.text
         out, done = [], set()
         for m in re.finditer(r'<a\b[^>]*?href="(/items/(\d+)[^"]*)"[^>]*?>', page):
