@@ -210,6 +210,15 @@ class Vinted(Source):
 
 
 # ---------------------------------------------------------------- Mercari JP
+def _mercari_url(gid: str, item_type: str | None) -> str:
+    """Обычные товары: /item/m123..., товары Mercari Shops (id без «m»+цифр): /shops/product/<id>."""
+    import re
+
+    if re.fullmatch(r"m\d+", gid) and "BEYOND" not in (item_type or ""):
+        return f"https://jp.mercari.com/item/{gid}"
+    return f"https://jp.mercari.com/shops/product/{gid}"
+
+
 def _b64(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
@@ -299,7 +308,7 @@ class MercariJP(Source):
                     it.get("name", ""),
                     float(it.get("price") or 0),
                     "JPY",
-                    f"https://jp.mercari.com/item/{it['id']}",
+                    _mercari_url(str(it["id"]), it.get("itemType")),
                     thumbs[0] if thumbs else None,
                     _ts(it.get("created")),
                 )
@@ -427,6 +436,90 @@ class Bunjang(CardSource):
             return r
         r2 = await self.get(f"{self.base}/keywords/{quote(term)}", headers=h)
         return r2 if r2.status_code == 200 or r.status_code != 200 else r
+
+
+    async def diag(self, term: str) -> str:
+        """Что видит бот на страницах Bunjang + поиск адресов API в коде сайта."""
+        import re
+        from urllib.parse import quote
+
+        h = {"Accept": "text/html,application/xhtml+xml", "Accept-Language": "ko,en;q=0.8"}
+        lines = []
+        shell = ""
+        for name, url, kw in (
+            ("поиск", f"{self.base}/search/products", {"q": term, "order": "date"}),
+            ("ключевое слово", f"{self.base}/keywords/{quote(term)}", {}),
+        ):
+            r = await self.get(url, params=kw or None, headers=h)
+            t = r.text
+            lines.append(
+                f"{name}: HTTP {r.status_code}, {len(t)} симв., ссылок /products/: {len(self.link_re.findall(t))}, "
+                f"разобрано: {len(self.parse(t))}, __NEXT_DATA__: {'__NEXT_DATA__' in t}"
+            )
+            if not shell and "<script" in t:
+                shell = t
+        scripts = re.findall(r'<script[^>]+src="([^"]+)"', shell)
+        lines.append(f"скриптов на странице: {len(scripts)}")
+        found = []
+        for src in scripts[:6]:
+            if src.startswith("//"):
+                src = "https:" + src
+            elif src.startswith("/"):
+                src = self.base + src
+            try:
+                js = (await self.get(src, headers={"Referer": self.base + "/"})).text
+            except Exception:
+                continue
+            for u in re.findall(r"https?://[\w.-]*bunjang[\w.-]*/[\w./%-]{0,70}", js):
+                if "api" in u and u not in found:
+                    found.append(u)
+            for u in re.findall(r"[\"'`](/api/[\w./-]{0,60})[\"'`]", js):
+                if u not in found:
+                    found.append(u)
+        lines.append("адреса API в коде сайта: " + (" | ".join(found[:12]) or "не нашёл"))
+        return "\n".join(lines)
+
+
+    async def diag(self, term: str) -> str:
+        """Поиск адреса API в скриптах сайта (страница поиска - пустая оболочка, товары грузятся скриптом)."""
+        import asyncio
+        import re
+        from urllib.parse import urljoin
+
+        h = {"Accept": "text/html,application/xhtml+xml", "Accept-Language": "ko,en;q=0.8"}
+        page_url = f"{self.base}/search/products?q={term}&order=date"
+        r = await self.get(page_url, headers=h)
+        t = r.text
+        srcs = []
+        for u in re.findall(r'(?:src|href)="([^"]+\.js[^"]*)"', t):
+            u = urljoin(page_url, u)
+            if u not in srcs:
+                srcs.append(u)
+        lines = [f"Страница: HTTP {r.status_code}, {len(t)} симв., скриптов: {len(srcs)}"]
+        pat = re.compile(r"""https?://[A-Za-z0-9.-]*bunjang[A-Za-z0-9.-]*/[A-Za-z0-9_\-./{}$:?=&%]{0,90}|["'`](/api/[A-Za-z0-9_\-./{}$:]{3,80})""")
+
+        async def grab(u):
+            try:
+                rr = await self.get(u, headers={"Accept": "*/*"})
+                return u, rr.text
+            except Exception as e:
+                return u, ""
+
+        found = {}
+        for u, body in await asyncio.gather(*(grab(u) for u in srcs[:10])):
+            for m in pat.finditer(body):
+                val = m.group(1) or m.group(0)
+                if any(x in val for x in ("static.bunjang", "media.bunjang", ".png", ".jpg", ".svg", ".webp", ".css")):
+                    continue
+                found.setdefault(val, u.rsplit("/", 1)[-1][:20])
+        for m in pat.finditer(t):
+            found.setdefault(m.group(1) or m.group(0), "html")
+        interesting = [v for v in found if any(k in v.lower() for k in ("search", "find", "product", "keyword", "list"))]
+        rest = [v for v in found if v not in interesting]
+        lines.append(f"Найдено адресов: {len(found)} (про поиск/товары: {len(interesting)})")
+        for v in (interesting + rest)[:28]:
+            lines.append(f"- {v}")
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- Fruits Family

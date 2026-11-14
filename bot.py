@@ -423,7 +423,7 @@ async def test_sources(m: Message):
             return f"✅ {s.label}: {len(items)} объявл."
         except Exception as e:
             resp = getattr(e, "response", None)
-            code = f"HTTP {resp.status_code}" if resp is not None else type(e).__name__
+            code = f"HTTP {resp.status_code}" if resp is not None else (str(e)[:90] or type(e).__name__)
             line = f"❌ {s.label}: {code}"
             if resp is not None and s.code in ("vinted_fr", "bunjang", "2ndstreet_jp"):
                 body = " ".join(resp.text.split())[:160]
