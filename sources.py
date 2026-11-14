@@ -480,20 +480,52 @@ class Bunjang(CardSource):
         return "\n".join(lines)
 
 
-    API_HOSTS = ("https://api.bunjang.co.kr", "https://m.bunjang.co.kr")
+    API_HOST = "https://api.bunjang.co.kr"
     API_PATH = "/api/search/v8/web/search"
-    _ok = None  # (хост, номер варианта параметров), который сработал
+    _ok = None  # параметры, которые сработали
+    _policy: list[str] | None = None  # значения policyKey, найденные в скриптах сайта
+
+    async def _scripts(self, term: str) -> list[str]:
+        """Тексты скриптов сайта (в них прописаны параметры поиска)."""
+        import asyncio
+        import re
+        from urllib.parse import urljoin
+
+        page_url = f"{self.base}/search/products?q={term}&order=date"
+        r = await self.get(page_url, headers={"Accept": "text/html", "Accept-Language": "ko,en;q=0.8"})
+        srcs = []
+        for u in re.findall(r'(?:src|href)="([^"]+\.js[^"]*)"', r.text):
+            u = urljoin(page_url, u)
+            if u not in srcs:
+                srcs.append(u)
+
+        async def grab(u):
+            try:
+                return (await self.get(u, headers={"Accept": "*/*"})).text
+            except Exception:
+                return ""
+
+        return list(await asyncio.gather(*(grab(u) for u in srcs[:10])))
 
     @staticmethod
-    def _variants(term: str):
+    def _policy_keys(bodies: list[str]) -> list[str]:
+        import re
+
+        keys = []
+        for body in bodies:
+            for m in re.finditer(r"""policyKey\s*[:=]\s*["'`]([A-Za-z0-9_.:\-]{2,80})["'`]""", body):
+                keys.append(m.group(1))
+            for m in re.finditer(r"""policyKey\s*:\s*\w+\s*\?\s*["']([^"']{2,80})["']\s*:\s*["']([^"']{2,80})["']""", body):
+                keys += [m.group(1), m.group(2)]
+        return list(dict.fromkeys(keys))
+
+    @staticmethod
+    def _variants(term: str, pk: str):
         return [
-            {"q": term, "order": "date", "page": 0, "n": 100},
-            {"q": term, "order": "date", "page": 1, "n": 100},
-            {"q": term, "sort": "date", "page": 0, "n": 100},
-            {"keyword": term, "order": "date", "page": 0, "n": 100},
-            {"query": term, "order": "date", "page": 0, "size": 100},
-            {"q": term, "order": "date"},
-            {"q": term},
+            {"policyKey": pk, "q": term, "size": 60},
+            {"policyKey": pk, "keyword": term, "size": 60},
+            {"policyKey": pk, "q": term, "size": 60, "order": "date"},
+            {"policyKey": pk, "query": term, "size": 60},
         ]
 
     @staticmethod
@@ -545,17 +577,17 @@ class Bunjang(CardSource):
         hdr = {"Accept": "application/json, text/plain, */*", "Referer": f"{self.base}/", "Origin": self.base,
                "Accept-Language": "ko,en;q=0.8"}
         report = []
-        tried = []
-        if Bunjang._ok:
-            host, i = Bunjang._ok
-            tried.append((host, i))
-        tried += [(h, i) for h in self.API_HOSTS for i in range(len(self._variants(term)))]
-        for host, i in tried[:12]:
-            params = self._variants(term)[i]
+        if Bunjang._policy is None:
+            Bunjang._policy = self._policy_keys(await self._scripts(term))
+        tries = [Bunjang._ok] if Bunjang._ok else []
+        for pk in Bunjang._policy[:4]:
+            tries += [(pk, i) for i in range(4)]
+        for pk, i in tries[:10]:
+            params = self._variants(term, pk)[i]
             try:
-                r = await self.get(host + self.API_PATH, params=params, headers=hdr)
+                r = await self.get(self.API_HOST + self.API_PATH, params=params, headers=hdr)
             except Exception as e:
-                report.append(f"{host[8:20]} #{i}: ошибка {type(e).__name__}")
+                report.append(f"{pk[:20]} #{i}: ошибка {type(e).__name__}")
                 continue
             items = []
             if r.status_code == 200:
@@ -563,9 +595,9 @@ class Bunjang(CardSource):
                     items = self._to_items(r.json())
                 except Exception:
                     pass
-            report.append(f"{host[8:20]} #{i} {list(params)}: HTTP {r.status_code}, товаров {len(items)}, {' '.join(r.text.split())[:90]!r}")
+            report.append(f"{pk[:25]} #{i} {[k for k in params if k != 'policyKey']}: HTTP {r.status_code}, товаров {len(items)}, {' '.join(r.text.split())[:150]!r}")
             if items:
-                Bunjang._ok = (host, i)
+                Bunjang._ok = (pk, i)
                 return items, report
         return [], report
 
@@ -576,38 +608,28 @@ class Bunjang(CardSource):
         return await super().search(term)  # запасной вариант: разбор HTML
 
     async def diag(self, term: str) -> str:
-        """Показывает, как сайт вызывает поиск (кусок кода) и что отвечает API."""
-        import asyncio
+        """Показывает, откуда берётся policyKey, и что отвечает API."""
         import re
-        from urllib.parse import urljoin
 
-        page_url = f"{self.base}/search/products?q={term}&order=date"
-        r = await self.get(page_url, headers={"Accept": "text/html", "Accept-Language": "ko,en;q=0.8"})
-        srcs = []
-        for u in re.findall(r'(?:src|href)="([^"]+\.js[^"]*)"', r.text):
-            u = urljoin(page_url, u)
-            if u not in srcs:
-                srcs.append(u)
-
-        async def grab(u):
-            try:
-                return (await self.get(u, headers={"Accept": "*/*"})).text
-            except Exception:
-                return ""
-
-        lines = []
-        for body in await asyncio.gather(*(grab(u) for u in srcs[:10])):
-            i = body.find("search/v8/web/search")
-            if i >= 0:
-                lines.append("JS: " + " ".join(body[max(0, i - 350): i + 450].split()))
+        bodies = await self._scripts(term)
+        Bunjang._policy = self._policy_keys(bodies)
+        lines = [f"policyKey в скриптах: {Bunjang._policy[:8] or 'не найден'}"]
+        shown = 0
+        for body in bodies:
+            for m in re.finditer(r"policyKey", body):
+                ctx = " ".join(body[max(0, m.start() - 120): m.start() + 200].split())
+                if re.search(r"policyKey\s*[:=]\s*[\"'`]", ctx) or shown == 0:
+                    lines.append("JS: " + ctx)
+                    shown += 1
+                if shown >= 3:
+                    break
+            if shown >= 3:
                 break
-        else:
-            lines.append("JS: кусок с search/v8/web/search не найден")
         items, report = await self._api(term)
         lines.append(f"Итого товаров: {len(items)}")
         for it in items[:3]:
             lines.append(f"• {it.title[:50]} | {it.price:,.0f} ₩ | {it.url}")
-        lines += report[:8]
+        lines += report[:6]
         return "\n".join(lines)
 
 
