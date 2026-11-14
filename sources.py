@@ -480,45 +480,134 @@ class Bunjang(CardSource):
         return "\n".join(lines)
 
 
+    API_HOSTS = ("https://api.bunjang.co.kr", "https://m.bunjang.co.kr")
+    API_PATH = "/api/search/v8/web/search"
+    _ok = None  # (хост, номер варианта параметров), который сработал
+
+    @staticmethod
+    def _variants(term: str):
+        return [
+            {"q": term, "order": "date", "page": 0, "n": 100},
+            {"q": term, "order": "date", "page": 1, "n": 100},
+            {"q": term, "sort": "date", "page": 0, "n": 100},
+            {"keyword": term, "order": "date", "page": 0, "n": 100},
+            {"query": term, "order": "date", "page": 0, "size": 100},
+            {"q": term, "order": "date"},
+            {"q": term},
+        ]
+
+    @staticmethod
+    def _find_products(obj) -> list[dict]:
+        """Ищет в любом JSON список товаров (словари с pid / id, названием и ценой)."""
+        found = []
+
+        def walk(o):
+            if isinstance(o, dict):
+                if (o.get("pid") or o.get("id")) and (o.get("name") or o.get("title")) and o.get("price") is not None:
+                    found.append(o)
+                    return
+                for v in o.values():
+                    walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+
+        walk(obj)
+        return found
+
+    def _to_items(self, data) -> list[Item]:
+        out, seen = [], set()
+        for d in self._find_products(data):
+            if d.get("ad") or d.get("is_ad"):
+                continue
+            pid = str(d.get("pid") or d.get("id"))
+            if pid in seen or not pid.isdigit():
+                continue
+            seen.add(pid)
+            try:
+                price = float(str(d.get("price")).replace(",", ""))
+            except ValueError:
+                continue
+            img = d.get("product_image") or d.get("image") or d.get("imageUrl") or d.get("thumbnail") or ""
+            if isinstance(img, list):
+                img = img[0] if img else ""
+            if isinstance(img, dict):
+                img = img.get("url") or ""
+            img = str(img).replace("{cnt}", "1").replace("{res}", "300") or None
+            if img and img.startswith("//"):
+                img = "https:" + img
+            out.append(Item(self.code, pid, str(d.get("name") or d.get("title")), price, "KRW",
+                            f"{self.base}/products/{pid}", img))
+        return out
+
+    async def _api(self, term: str):
+        """Пробует новый поиск Bunjang; возвращает (товары, отчёт по попыткам)."""
+        hdr = {"Accept": "application/json, text/plain, */*", "Referer": f"{self.base}/", "Origin": self.base,
+               "Accept-Language": "ko,en;q=0.8"}
+        report = []
+        tried = []
+        if Bunjang._ok:
+            host, i = Bunjang._ok
+            tried.append((host, i))
+        tried += [(h, i) for h in self.API_HOSTS for i in range(len(self._variants(term)))]
+        for host, i in tried[:12]:
+            params = self._variants(term)[i]
+            try:
+                r = await self.get(host + self.API_PATH, params=params, headers=hdr)
+            except Exception as e:
+                report.append(f"{host[8:20]} #{i}: ошибка {type(e).__name__}")
+                continue
+            items = []
+            if r.status_code == 200:
+                try:
+                    items = self._to_items(r.json())
+                except Exception:
+                    pass
+            report.append(f"{host[8:20]} #{i} {list(params)}: HTTP {r.status_code}, товаров {len(items)}, {' '.join(r.text.split())[:90]!r}")
+            if items:
+                Bunjang._ok = (host, i)
+                return items, report
+        return [], report
+
+    async def search(self, term: str) -> list[Item]:
+        items, _ = await self._api(term)
+        if items:
+            return items
+        return await super().search(term)  # запасной вариант: разбор HTML
+
     async def diag(self, term: str) -> str:
-        """Поиск адреса API в скриптах сайта (страница поиска - пустая оболочка, товары грузятся скриптом)."""
+        """Показывает, как сайт вызывает поиск (кусок кода) и что отвечает API."""
         import asyncio
         import re
         from urllib.parse import urljoin
 
-        h = {"Accept": "text/html,application/xhtml+xml", "Accept-Language": "ko,en;q=0.8"}
         page_url = f"{self.base}/search/products?q={term}&order=date"
-        r = await self.get(page_url, headers=h)
-        t = r.text
+        r = await self.get(page_url, headers={"Accept": "text/html", "Accept-Language": "ko,en;q=0.8"})
         srcs = []
-        for u in re.findall(r'(?:src|href)="([^"]+\.js[^"]*)"', t):
+        for u in re.findall(r'(?:src|href)="([^"]+\.js[^"]*)"', r.text):
             u = urljoin(page_url, u)
             if u not in srcs:
                 srcs.append(u)
-        lines = [f"Страница: HTTP {r.status_code}, {len(t)} симв., скриптов: {len(srcs)}"]
-        pat = re.compile(r"""https?://[A-Za-z0-9.-]*bunjang[A-Za-z0-9.-]*/[A-Za-z0-9_\-./{}$:?=&%]{0,90}|["'`](/api/[A-Za-z0-9_\-./{}$:]{3,80})""")
 
         async def grab(u):
             try:
-                rr = await self.get(u, headers={"Accept": "*/*"})
-                return u, rr.text
-            except Exception as e:
-                return u, ""
+                return (await self.get(u, headers={"Accept": "*/*"})).text
+            except Exception:
+                return ""
 
-        found = {}
-        for u, body in await asyncio.gather(*(grab(u) for u in srcs[:10])):
-            for m in pat.finditer(body):
-                val = m.group(1) or m.group(0)
-                if any(x in val for x in ("static.bunjang", "media.bunjang", ".png", ".jpg", ".svg", ".webp", ".css")):
-                    continue
-                found.setdefault(val, u.rsplit("/", 1)[-1][:20])
-        for m in pat.finditer(t):
-            found.setdefault(m.group(1) or m.group(0), "html")
-        interesting = [v for v in found if any(k in v.lower() for k in ("search", "find", "product", "keyword", "list"))]
-        rest = [v for v in found if v not in interesting]
-        lines.append(f"Найдено адресов: {len(found)} (про поиск/товары: {len(interesting)})")
-        for v in (interesting + rest)[:28]:
-            lines.append(f"- {v}")
+        lines = []
+        for body in await asyncio.gather(*(grab(u) for u in srcs[:10])):
+            i = body.find("search/v8/web/search")
+            if i >= 0:
+                lines.append("JS: " + " ".join(body[max(0, i - 350): i + 450].split()))
+                break
+        else:
+            lines.append("JS: кусок с search/v8/web/search не найден")
+        items, report = await self._api(term)
+        lines.append(f"Итого товаров: {len(items)}")
+        for it in items[:3]:
+            lines.append(f"• {it.title[:50]} | {it.price:,.0f} ₩ | {it.url}")
+        lines += report[:8]
         return "\n".join(lines)
 
 
