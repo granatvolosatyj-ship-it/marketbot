@@ -17,6 +17,7 @@ from sources import Item, Source
 
 log = logging.getLogger("poller")
 MAX_PER_TERM = 20  # защита от потока сообщений
+MAX_AGE = 3 * 86400  # объявления старше 3 суток не присылаем
 CONCURRENCY = 4  # сколько запросов к одной площадке одновременно
 
 
@@ -88,7 +89,8 @@ async def process(db: DB, bot: Bot, rates: Rates, source: Source, brand: str, qu
             for uid, _ in users:
                 db.claim_sent(uid, dedup_key(source, i))
         return
-    for i in list(reversed(new))[-MAX_PER_TERM:]:  # от старых к новым
+    fresh = [i for i in new if not i.created or time.time() - i.created < MAX_AGE]  # старые объявления не шлём
+    for i in list(reversed(fresh))[-MAX_PER_TERM:]:  # от старых к новым
         caption = format_caption(i, source, brand, rates)
         key = dedup_key(source, i)
         rub = rates.to_rub(i.price, i.currency)
