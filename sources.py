@@ -85,8 +85,12 @@ class Source:
 # ---------------------------------------------------------------- Vinted
 class Vinted(Source):
     impersonate = True
-    interval = 75  # секунд между проверками (чаще Vinted блокирует: ошибка 429)
-    _sem = None
+    interval = 90  # секунд между проверками (чаще Vinted блокирует: ошибка 429)
+    MIN_GAP = 2.0  # не чаще одного запроса к Vinted раз в столько секунд (на все страны сразу)
+    _lock = None
+    _last = 0.0
+    _cool_until = 0.0  # общая пауза: Vinted ограничивает по адресу сервера, а не по стране
+    _cool_n = 0
 
     async def diag(self, term: str) -> str:
         """Диагностика для команды /peek: что отвечает сайт."""
@@ -120,8 +124,6 @@ class Vinted(Source):
         self.flag = flag
         self.currency = currency
         self._has_cookie = False
-        self._cool_until = 0.0
-        self._cool_n = 0
 
     async def _refresh(self):
         (self.cffi or self.client).cookies.clear()
@@ -132,38 +134,16 @@ class Vinted(Source):
         r.raise_for_status()  # если главная страница закрыта, ошибка будет видна в /test
         self._has_cookie = True
 
-    async def search(self, term: str) -> list[Item]:
-        """Разбор HTML страницы каталога (внутренний API отдаёт 404, а страница открывается)."""
+    def _parse_page(self, page: str) -> list[Item]:
+        """Один проход по странице: фото по номеру товара собираем заранее, а не ищем для каждого."""
         import html as htmllib
-        import logging
         import re
 
-        import asyncio
-
-        left = self._cool_until - time.monotonic()
-        if left > 0:
-            raise RuntimeError(f"Vinted просит не частить, пауза ещё {int(left)} с")
-        if Vinted._sem is None:
-            Vinted._sem = asyncio.Semaphore(3)  # не больше 3 запросов к Vinted одновременно
-        url = f"https://www.vinted.{self.tld}/catalog"
-        params = {"search_text": term, "order": "newest_first"}
-        headers = {"Accept": "text/html,application/xhtml+xml"}
-        async with Vinted._sem:
-            await asyncio.sleep(random.uniform(0.2, 0.8))
-            if not self._has_cookie:
-                await self._refresh()
-            r = await self.get(url, params=params, headers=headers)
-            if r.status_code in (401, 403):
-                await self._refresh()
-                r = await self.get(url, params=params, headers=headers)
-        if r.status_code == 429:
-            self._cool_n += 1
-            pause = min(60 * 2 ** (self._cool_n - 1), 600)  # 60, 120, 240, 480, 600 с
-            self._cool_until = time.monotonic() + pause
-            raise RuntimeError(f"HTTP 429: Vinted просит не частить, пауза {pause} с")
-        r.raise_for_status()
-        self._cool_n = 0
-        page = r.text
+        photos = {}
+        for im in re.finditer(r'<img\b[^>]*?product-item-id-(\d+)--image--img[^>]*>', page):
+            sm = re.search(r'\bsrc="([^"]+)"', im.group(0))
+            if sm:
+                photos.setdefault(im.group(1), htmllib.unescape(sm.group(1)))
         out, done = [], set()
         for m in re.finditer(r'<a\b[^>]*?href="(/items/(\d+)[^"]*)"[^>]*?>', page):
             tag, gid = m.group(0), m.group(2)
@@ -172,31 +152,23 @@ class Vinted(Source):
             tm = re.search(r'\btitle="([^"]*)"', tag)
             if not tm:
                 continue
-            full = htmllib.unescape(tm.group(1))
-            parts = full.rsplit(", ", 2)
+            parts = htmllib.unescape(tm.group(1)).rsplit(", ", 2)
             if len(parts) < 3:
                 continue
-            name, price_s = parts[0], parts[1]
-            pm = re.search(r"\d[\d\s\u00a0]*(?:[.,]\d+)?", price_s)
+            pm = re.search(r"\d[\d\s\u00a0]*(?:[.,]\d+)?", parts[1])
             if not pm:
                 continue
-            num = re.sub(r"[\s\u00a0]", "", pm.group(0)).replace(",", ".")
             try:
-                price = float(num)
+                price = float(re.sub(r"[\s\u00a0]", "", pm.group(0)).replace(",", "."))
             except ValueError:
                 continue
             done.add(gid)
-            photo = None
-            im = re.search(r'<img\b[^>]*product-item-id-%s--image--img[^>]*>' % gid, page)
-            if im:
-                sm = re.search(r'\bsrc="([^"]+)"', im.group(0))
-                if sm:
-                    photo = htmllib.unescape(sm.group(1))
+            photo = photos.get(gid)
             out.append(
                 Item(
                     self.code,
                     gid,
-                    name[:200],
+                    parts[0][:200],
                     price,
                     self.currency,
                     f"https://www.vinted.{self.tld}{m.group(1).split('?')[0]}",
@@ -204,6 +176,44 @@ class Vinted(Source):
                     _vinted_ts(photo),
                 )
             )
+        return out
+
+    async def search(self, term: str) -> list[Item]:
+        """Разбор HTML страницы каталога (внутренний API отдаёт 404, а страница открывается)."""
+        import html as htmllib
+        import logging
+        import re
+
+        import asyncio
+
+        cls = Vinted
+        left = cls._cool_until - time.monotonic()
+        if left > 0:
+            raise RuntimeError(f"Vinted просит не частить, пауза ещё {int(left)} с")
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        async with cls._lock:  # запросы к Vinted стартуют по очереди, с паузой между ними
+            wait = cls._last + cls.MIN_GAP - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait + random.uniform(0, 0.5))
+            cls._last = time.monotonic()
+        url = f"https://www.vinted.{self.tld}/catalog"
+        params = {"search_text": term, "order": "newest_first"}
+        headers = {"Accept": "text/html,application/xhtml+xml"}
+        if not self._has_cookie:
+            await self._refresh()
+        r = await self.get(url, params=params, headers=headers)
+        if r.status_code in (401, 403):
+            await self._refresh()
+            r = await self.get(url, params=params, headers=headers)
+        if r.status_code == 429:
+            cls._cool_n += 1
+            pause = min(60 * 2 ** (cls._cool_n - 1), 600)  # 60, 120, 240, 480, 600 с
+            cls._cool_until = time.monotonic() + pause
+            raise RuntimeError(f"HTTP 429: Vinted просит не частить, пауза {pause} с")
+        r.raise_for_status()
+        cls._cool_n = 0
+        out = await asyncio.to_thread(self._parse_page, r.text)  # тяжёлый разбор не блокирует бота
         if not out:
             logging.getLogger("vinted").warning("%s '%s': ничего не найдено", self.tld, term)
         return out
@@ -505,7 +515,18 @@ class Bunjang(CardSource):
             except Exception:
                 return ""
 
-        return list(await asyncio.gather(*(grab(u) for u in srcs[:10])))
+        bodies = list(await asyncio.gather(*(grab(u) for u in srcs[:10])))
+        # подгружаемые «ленивые» куски скриптов: ищем их имена внутри уже скачанных
+        more = []
+        for body in bodies:
+            for m in re.findall(r"""["'`]((?:/|\./)?[\w\-./]*?[\w\-]+\.js)["'`]""", body):
+                u = urljoin(page_url, m)
+                if u not in srcs and u not in more and "bunjang" in u:
+                    more.append(u)
+        key_hint = ("search", "product", "main", "grid", "list", "api", "route", "filter")
+        more.sort(key=lambda u: not any(k in u.lower() for k in key_hint))
+        bodies += list(await asyncio.gather(*(grab(u) for u in more[:30])))
+        return bodies
 
     @staticmethod
     def _policy_keys(bodies: list[str]) -> list[str]:

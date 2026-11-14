@@ -467,6 +467,8 @@ async def test_sources(m: Message):
     wait = await m.answer("Проверяю площадки, подожди до 30 секунд...")
 
     async def check(s):
+        if s.code.startswith("vinted_") and s.code not in ("vinted_fr", "vinted_de"):
+            return f"⏭ {s.label}: не проверяю (та же система, что FR и DE; частые проверки вызывают блокировку 429)"
         try:
             items = await asyncio.wait_for(s.search("nike"), timeout=25)
             return f"✅ {s.label}: {len(items)} объявл."
