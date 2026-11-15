@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
-from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message,
+from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message,
                            ReplyKeyboardMarkup)
 
 import config
@@ -62,7 +62,7 @@ def menu_kb(uid: int) -> ReplyKeyboardMarkup:
     ]
     if uid == config.ADMIN_ID:
         rows.append([KeyboardButton(text=BTN_TEST)])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True,
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=False,
                                input_field_placeholder="Напиши бренд, например Nike")
 
 
@@ -655,6 +655,18 @@ async def main():
     bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
+    try:  # кнопка «Меню» слева от поля ввода: список команд
+        await bot.set_my_commands([
+            BotCommand(command="menu", description="Показать кнопки"),
+            BotCommand(command="list", description="Мои бренды"),
+            BotCommand(command="limit", description="Лимит цены"),
+            BotCommand(command="countries", description="Страны и площадки"),
+            BotCommand(command="stop", description="Пауза"),
+            BotCommand(command="resume", description="Включить"),
+            BotCommand(command="help", description="Помощь"),
+        ])
+    except Exception:
+        pass
     asyncio.create_task(rates.loop())
     asyncio.create_task(run_poller(db, bot, rates, sources))
     await dp.start_polling(bot)
