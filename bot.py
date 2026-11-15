@@ -203,9 +203,15 @@ async def apply_limit(m: Message, what: str):
     else:
         db.set_brand_limit(uid, what, amount)
         who = html.escape(what)
-    await m.answer(
-        f"Лимит для {who} снят ✅" if off else f"Для {who}: не дороже {amount:,.0f} ₽ ✅".replace(",", " ")
-    )
+    done_text = f"Лимит для {who} снят ✅" if off else f"Для {who}: не дороже {amount:,.0f} ₽ ✅".replace(",", " ")
+    if what != "all":  # после лимита бренда сразу показываем выбор стран и площадок
+        sub = next((s for s in db.user_subs(uid) if s["brand"] == what), None)
+        if sub:
+            return await m.answer(
+                done_text + "\n\n" + brand_text(sub) + "\nХочешь везде, как есть? Просто закрой эту панель.",
+                reply_markup=brand_kb(sub["id"]),
+            )
+    await m.answer(done_text)
 
 
 @router.message(Command("limit"))
