@@ -663,6 +663,13 @@ class Bunjang(CardSource):
                     break
             if shown >= 10:
                 break
+        paths = []
+        for body in bodies:
+            for p in re.findall(r"""["'`](/api/[\w/.\-{}$]{3,70})""", body):
+                if p not in paths:
+                    paths.append(p)
+        key = [p for p in paths if re.search(r"polic|config|layout|route|schema|search|meta|setting", p, re.I)]
+        lines.append(f"адреса /api/: всего {len(paths)}; подходящие: " + ", ".join(key[:25]))
         items, report = await self._api(term)
         lines.append(f"Итого товаров: {len(items)}")
         for it in items[:3]:
