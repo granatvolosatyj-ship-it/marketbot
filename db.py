@@ -34,6 +34,7 @@ class DB:
             "ALTER TABLE users ADD COLUMN paused INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN max_rub REAL",
             "ALTER TABLE subs ADD COLUMN max_rub REAL",
+            "ALTER TABLE subs ADD COLUMN setup INTEGER DEFAULT 0",
         ):
             try:  # миграция старой базы: если колонка уже есть, это нормально
                 self.c.execute(stmt)
@@ -56,10 +57,19 @@ class DB:
         return self.c.execute("SELECT id, name, allowed FROM users ORDER BY id").fetchall()
 
     # subs
-    def add_sub(self, uid: int, brand: str) -> bool:
-        cur = self.c.execute("INSERT OR IGNORE INTO subs(user_id, brand) VALUES(?,?)", (uid, brand))
+    def add_sub(self, uid: int, brand: str, setup: bool = False) -> bool:
+        """setup=True: бренд ещё настраивается (цена, площадки), объявления по нему не шлём."""
+        cur = self.c.execute("INSERT OR IGNORE INTO subs(user_id, brand, setup) VALUES(?,?,?)", (uid, brand, int(setup)))
         self.c.commit()
         return cur.rowcount > 0
+
+    def is_setup(self, sub_id: int) -> bool:
+        r = self.c.execute("SELECT setup FROM subs WHERE id=?", (sub_id,)).fetchone()
+        return bool(r and r["setup"])
+
+    def finish_setup(self, sub_id: int):
+        self.c.execute("UPDATE subs SET setup=0 WHERE id=?", (sub_id,))
+        self.c.commit()
 
     def del_sub(self, uid: int, sub_id: int):
         self.c.execute("DELETE FROM sub_disabled WHERE sub_id IN (SELECT id FROM subs WHERE id=? AND user_id=?)", (sub_id, uid))
@@ -83,7 +93,7 @@ class DB:
         self.c.commit()
 
     def user_subs(self, uid: int):
-        return self.c.execute("SELECT id, brand, max_rub FROM subs WHERE user_id=? ORDER BY id", (uid,)).fetchall()
+        return self.c.execute("SELECT id, brand, max_rub, COALESCE(setup,0) AS setup FROM subs WHERE user_id=? ORDER BY id", (uid,)).fetchall()
 
     # пауза и лимиты цены (в рублях)
     def set_paused(self, uid: int, paused: bool):
@@ -135,7 +145,7 @@ class DB:
         rows = self.c.execute(
             """SELECT s.user_id, COALESCE(s.max_rub, u.max_rub) AS lim, s.id AS sid
                FROM subs s JOIN users u ON u.id=s.user_id
-               WHERE s.brand=? AND u.allowed=1 AND COALESCE(u.paused,0)=0
+               WHERE s.brand=? AND u.allowed=1 AND COALESCE(u.paused,0)=0 AND COALESCE(s.setup,0)=0
                AND NOT EXISTS (SELECT 1 FROM disabled d WHERE d.user_id=s.user_id AND d.source=?)
                AND NOT EXISTS (SELECT 1 FROM sub_disabled sd WHERE sd.sub_id=s.id AND sd.source=?)
                AND NOT EXISTS (SELECT 1 FROM muted m WHERE m.sub_id=s.id AND m.until>?)""",

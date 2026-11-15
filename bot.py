@@ -166,6 +166,7 @@ async def new_done(c: CallbackQuery):
     sub = db.get_sub(c.from_user.id, int(c.data.split(":")[1]))
     if not sub:
         return await c.answer("Бренд уже удалён")
+    db.finish_setup(sub["id"])  # только теперь бренд включается: до этого ничего не присылаем
     lim = f"до {sub['max_rub']:,.0f} ₽".replace(",", " ") if sub["max_rub"] else "без лимита цены"
     await c.message.edit_text(
         f"Готово ✅ Ищу <b>{html.escape(sub['brand'])}</b>: {lim}, площадки: {where_text(db.brand_disabled(sub['id']))}.\n"
@@ -177,8 +178,10 @@ async def new_done(c: CallbackQuery):
 @router.message(Command("cancel"))
 async def cancel(m: Message):
     was = pending.pop(m.from_user.id, None)
+    if was and was.startswith("new:"):
+        db.finish_setup(int(was.split(":")[1]))
     await m.answer(
-        "Отменено. Бренд остался без лимита цены и на всех площадках (изменить: /list)."
+        "Отменено. Бренд включён без лимита цены и на всех площадках (изменить: /list)."
         if was and was.startswith("new:") else "Отменено."
     )
 
@@ -269,7 +272,8 @@ def list_kb(uid: int) -> InlineKeyboardMarkup:
     rows = []
     for s in db.user_subs(uid):
         lim = f" · до {s['max_rub']:,.0f} ₽".replace(",", " ") if s["max_rub"] else ""
-        text = f"⚙️ {s['brand']}{lim} · {where_text(db.brand_disabled(s['id']))}"
+        mark = "⏳ не настроен · " if s["setup"] else "⚙️ "
+        text = f"{mark}{s['brand']}{lim} · {where_text(db.brand_disabled(s['id']))}"
         rows.append(
             [
                 InlineKeyboardButton(text=text[:60], callback_data=f"bs:{s['id']}"),
@@ -283,6 +287,7 @@ LIST_TEXT = "Твои бренды. ⚙️ выбрать, где искать (
 
 
 def brand_kb(sub_id: int, done: bool = False) -> InlineKeyboardMarkup:
+    done = done or db.is_setup(sub_id)  # бренд ещё не настроен: показываем «Готово»
     off = db.brand_disabled(sub_id)
     rows, row = [], []
     for s in ready:
@@ -630,7 +635,7 @@ async def add_brand(m: Message):
             return await apply_limit(m, what)
         pending.pop(uid, None)  # ждали сумму, а пришёл другой бренд: добавляем его
     brand = " ".join(m.text.lower().split())[:50]
-    if db.add_sub(uid, brand):
+    if db.add_sub(uid, brand, setup=True):
         sub = next(s for s in db.user_subs(uid) if s["brand"] == brand)
         pending[uid] = f"new:{sub['id']}"
         kb = InlineKeyboardMarkup(
