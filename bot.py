@@ -6,7 +6,8 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message,
+                           ReplyKeyboardMarkup)
 
 import config
 from currency import Rates
@@ -43,14 +44,36 @@ async def deny(m: Message):
     await m.answer(f"Нет доступа. Твой ID: <code>{m.from_user.id}</code>. Отправь его админу.")
 
 
-@router.message(Command("start", "help"))
+BTN_BRANDS = "📋 Мои бренды"
+BTN_LIMIT = "💰 Лимит цены"
+BTN_WHERE = "🌍 Площадки"
+BTN_PAUSE = "⏸ Пауза"
+BTN_RESUME = "▶️ Старт"
+BTN_TEST = "🧪 Тест"
+BTN_HELP = "❓ Помощь"
+
+
+def menu_kb(uid: int) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text=BTN_BRANDS), KeyboardButton(text=BTN_LIMIT)],
+        [KeyboardButton(text=BTN_WHERE), KeyboardButton(text=BTN_HELP)],
+        [KeyboardButton(text=BTN_PAUSE), KeyboardButton(text=BTN_RESUME)],
+    ]
+    if uid == config.ADMIN_ID:
+        rows.append([KeyboardButton(text=BTN_TEST)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True,
+                               input_field_placeholder="Напиши бренд, например Nike")
+
+
+@router.message(Command("start", "help", "menu"))
 async def start(m: Message, command: CommandObject):
     if not has_access(m.from_user.id):
         return await deny(m)
     if command.command == "start" and db.is_paused(m.from_user.id):
         db.set_paused(m.from_user.id, False)
         await m.answer("▶️ Уведомления снова включены.")
-    await m.answer(HELP + (ADMIN_HELP if m.from_user.id == config.ADMIN_ID else ""))
+    await m.answer(HELP + (ADMIN_HELP if m.from_user.id == config.ADMIN_ID else ""),
+                   reply_markup=menu_kb(m.from_user.id))
 
 
 def sub_label(s) -> str:
@@ -558,6 +581,31 @@ async def peek(m: Message, command: CommandObject):
 
 
 # ---------- любой текст = новый бренд
+def _cmd(name: str) -> CommandObject:
+    return CommandObject(prefix="/", command=name, mention=None, args=None)
+
+
+@router.message(F.text.in_({BTN_BRANDS, BTN_LIMIT, BTN_WHERE, BTN_PAUSE, BTN_RESUME, BTN_TEST, BTN_HELP}))
+async def menu_buttons(m: Message):
+    if not has_access(m.from_user.id):
+        return await deny(m)
+    pending.pop(m.from_user.id, None)  # нажали кнопку меню: отменяем ввод суммы
+    t = m.text
+    if t == BTN_BRANDS:
+        return await list_subs(m)
+    if t == BTN_LIMIT:
+        return await limit(m, _cmd("limit"))
+    if t == BTN_WHERE:
+        return await countries(m)
+    if t == BTN_PAUSE:
+        return await stop(m)
+    if t == BTN_RESUME:
+        return await resume(m)
+    if t == BTN_TEST:
+        return await test_sources(m)
+    return await start(m, _cmd("help"))
+
+
 @router.message(F.text & ~F.text.startswith("/"))
 async def add_brand(m: Message):
     if not has_access(m.from_user.id):
