@@ -543,10 +543,10 @@ class Bunjang(CardSource):
     @staticmethod
     def _variants(term: str, pk: str):
         return [
+            {"policyKey": pk, "q": term, "size": 60, "sort": "latest"},
             {"policyKey": pk, "q": term, "size": 60},
-            {"policyKey": pk, "keyword": term, "size": 60},
             {"policyKey": pk, "q": term, "size": 60, "order": "date"},
-            {"policyKey": pk, "query": term, "size": 60},
+            {"policyKey": pk, "keyword": term, "size": 60},
         ]
 
     @staticmethod
@@ -571,7 +571,7 @@ class Bunjang(CardSource):
     def _to_items(self, data) -> list[Item]:
         out, seen = [], set()
         for d in self._find_products(data):
-            if d.get("ad") or d.get("is_ad"):
+            if d.get("ad") or d.get("is_ad") or str(d.get("type") or d.get("adType") or "") == "EXT_AD":
                 continue
             pid = str(d.get("pid") or d.get("id"))
             if pid in seen or not pid.isdigit():
@@ -581,16 +581,27 @@ class Bunjang(CardSource):
                 price = float(str(d.get("price")).replace(",", ""))
             except ValueError:
                 continue
-            img = d.get("product_image") or d.get("image") or d.get("imageUrl") or d.get("thumbnail") or ""
+            img = d.get("productImage") or d.get("product_image") or d.get("image") or d.get("imageUrl") or d.get("thumbnail") or ""
             if isinstance(img, list):
                 img = img[0] if img else ""
             if isinstance(img, dict):
                 img = img.get("url") or ""
-            img = str(img).replace("{cnt}", "1").replace("{res}", "300") or None
+            img = str(img).replace("{cnt}", "1").replace("{res}", "360") or None
             if img and img.startswith("//"):
                 img = "https:" + img
+            created = None
+            raw = d.get("createdAt") or d.get("updatedAt") or d.get("update_time")
+            try:
+                if raw is not None:
+                    if str(raw).replace(".", "").isdigit():
+                        created = float(raw) / (1000 if float(raw) > 1e11 else 1)
+                    else:
+                        from datetime import datetime
+                        created = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                created = None
             out.append(Item(self.code, pid, str(d.get("name") or d.get("title")), price, "KRW",
-                            f"{self.base}/products/{pid}", img))
+                            f"{self.base}/products/{pid}", img, created))
         return out
 
     async def _api(self, term: str):
@@ -599,7 +610,7 @@ class Bunjang(CardSource):
                "Accept-Language": "ko,en;q=0.8"}
         report = []
         if Bunjang._policy is None:
-            Bunjang._policy = self._policy_keys(await self._scripts(term))
+            Bunjang._policy = list(dict.fromkeys(["mw.product.keyword", "pw.product.keyword"] + self._policy_keys(await self._scripts(term))))
         tries = [Bunjang._ok] if Bunjang._ok else []
         for pk in Bunjang._policy[:4]:
             tries += [(pk, i) for i in range(4)]
@@ -633,8 +644,8 @@ class Bunjang(CardSource):
         import re
 
         bodies = await self._scripts(term)
-        Bunjang._policy = self._policy_keys(bodies)
-        lines = [f"policyKey в скриптах: {Bunjang._policy[:8] or 'не найден'}"]
+        Bunjang._policy = list(dict.fromkeys(self._policy_keys(bodies) + ["mw.product.keyword", "pw.product.keyword"]))
+        lines = [f"policyKey (в скриптах не найден, берём известные): {Bunjang._policy[:8] or 'не найден'}"]
         try:
             page = (await self.get(f"{self.base}/search/products?q={term}&order=date",
                                    headers={"Accept": "text/html", "Accept-Language": "ko,en;q=0.8"})).text
