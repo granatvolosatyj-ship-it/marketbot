@@ -419,12 +419,12 @@ def source_rows(off: set[str], cb) -> list[list[InlineKeyboardButton]]:
         ("🇨🇳 КИТАЙ", lambda s: s.code.endswith("_cn")),
     ]
     rows, used = [], set()
+    shown = [s for s in ready if s.code != "2ndstreet_jp"]  # пока не работает: не показываем
     for title, fits in sections:
-        group = [s for s in ready if fits(s) and s.code not in used]
+        group = [s for s in shown if fits(s) and s.code not in used]
         if not group:
             continue
         used.update(s.code for s in group)
-        rows.append([InlineKeyboardButton(text=f"━━ {title} ━━", callback_data="noop")])
         row = []
         for s in group:
             mark = "❌" if s.code in off else "✅"
@@ -434,9 +434,8 @@ def source_rows(off: set[str], cb) -> list[list[InlineKeyboardButton]]:
                 row = []
         if row:
             rows.append(row)
-    rest = [s for s in ready if s.code not in used]
+    rest = [s for s in shown if s.code not in used]
     if rest:
-        rows.append([InlineKeyboardButton(text="━━ ДРУГИЕ ━━", callback_data="noop")])
         for s in rest:
             mark = "❌" if s.code in off else "✅"
             rows.append([InlineKeyboardButton(text=f"{mark} {s.flag} {s.label}", callback_data=cb(s.code))])
@@ -454,9 +453,9 @@ def brand_kb(sub_id: int, done: bool = False) -> InlineKeyboardMarkup:
     rows = source_rows(off, lambda code: f"bt:{sub_id}:{code}")
     rows.append(
         [
-            InlineKeyboardButton(text="🌍 Везде", callback_data=f"bp:{sub_id}:all"),
-            InlineKeyboardButton(text="🇪🇺 Только Vinted", callback_data=f"bp:{sub_id}:eu"),
-            InlineKeyboardButton(text="🇯🇵🇰🇷 Только Азия", callback_data=f"bp:{sub_id}:asia"),
+            InlineKeyboardButton(text="🌍 Все", callback_data=f"bp:{sub_id}:all"),
+            InlineKeyboardButton(text="🇪🇺 Vinted", callback_data=f"bp:{sub_id}:eu"),
+            InlineKeyboardButton(text="🇯🇵🇰🇷 Азия", callback_data=f"bp:{sub_id}:asia"),
         ]
     )
     if done:
