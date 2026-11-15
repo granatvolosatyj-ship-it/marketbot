@@ -286,18 +286,59 @@ def list_kb(uid: int) -> InlineKeyboardMarkup:
 LIST_TEXT = "Твои бренды. ⚙️ выбрать, где искать (страны и площадки), 🗑 удалить:"
 
 
+COUNTRY_RU = {"fr": "Франция", "de": "Германия", "it": "Италия", "es": "Испания", "nl": "Нидерланды",
+              "be": "Бельгия", "at": "Австрия", "pt": "Португалия", "lu": "Люксембург", "lt": "Литва",
+              "pl": "Польша", "cz": "Чехия"}
+
+
+def source_title(s) -> str:
+    if s.code.startswith("vinted_"):
+        return COUNTRY_RU.get(s.code[len("vinted_"):], s.label)
+    return s.label
+
+
+def source_rows(off: set[str], cb) -> list[list[InlineKeyboardButton]]:
+    """Все площадки отдельно, по разделам: Vinted по странам, Япония, Корея, Китай."""
+    sections = [
+        ("🇪🇺 VINTED · ПО СТРАНАМ", lambda s: s.code.startswith("vinted_")),
+        ("🇯🇵 ЯПОНИЯ", lambda s: s.code.endswith("_jp")),
+        ("🇰🇷 КОРЕЯ", lambda s: s.code.endswith("_kr") or s.code == "bunjang"),
+        ("🇨🇳 КИТАЙ", lambda s: s.code.endswith("_cn")),
+    ]
+    rows, used = [], set()
+    for title, fits in sections:
+        group = [s for s in ready if fits(s) and s.code not in used]
+        if not group:
+            continue
+        used.update(s.code for s in group)
+        rows.append([InlineKeyboardButton(text=f"━━ {title} ━━", callback_data="noop")])
+        row = []
+        for s in group:
+            mark = "❌" if s.code in off else "✅"
+            row.append(InlineKeyboardButton(text=f"{mark} {s.flag} {source_title(s)}", callback_data=cb(s.code)))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+    rest = [s for s in ready if s.code not in used]
+    if rest:
+        rows.append([InlineKeyboardButton(text="━━ ДРУГИЕ ━━", callback_data="noop")])
+        for s in rest:
+            mark = "❌" if s.code in off else "✅"
+            rows.append([InlineKeyboardButton(text=f"{mark} {s.flag} {s.label}", callback_data=cb(s.code))])
+    return rows
+
+
+@router.callback_query(F.data == "noop")
+async def noop(c: CallbackQuery):
+    await c.answer()
+
+
 def brand_kb(sub_id: int, done: bool = False) -> InlineKeyboardMarkup:
     done = done or db.is_setup(sub_id)  # бренд ещё не настроен: показываем «Готово»
     off = db.brand_disabled(sub_id)
-    rows, row = [], []
-    for s in ready:
-        mark = "❌" if s.code in off else "✅"
-        row.append(InlineKeyboardButton(text=f"{mark} {s.flag} {s.label}", callback_data=f"bt:{sub_id}:{s.code}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+    rows = source_rows(off, lambda code: f"bt:{sub_id}:{code}")
     rows.append(
         [
             InlineKeyboardButton(text="🌍 Везде", callback_data=f"bp:{sub_id}:all"),
@@ -399,15 +440,7 @@ async def brand_preset(c: CallbackQuery):
 # ---------- страны
 def countries_kb(uid: int) -> InlineKeyboardMarkup:
     off = db.disabled_sources(uid)
-    rows, row = [], []
-    for s in ready:
-        mark = "❌" if s.code in off else "✅"
-        row.append(InlineKeyboardButton(text=f"{mark} {s.flag} {s.label}", callback_data=f"tg:{s.code}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+    rows = source_rows(off, lambda code: f"tg:{code}")
     rows.append(
         [
             InlineKeyboardButton(text="✅ Включить все", callback_data="all:on"),
