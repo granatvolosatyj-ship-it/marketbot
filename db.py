@@ -35,6 +35,7 @@ class DB:
             "ALTER TABLE users ADD COLUMN max_rub REAL",
             "ALTER TABLE subs ADD COLUMN max_rub REAL",
             "ALTER TABLE subs ADD COLUMN setup INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN denied INTEGER DEFAULT 0",
         ):
             try:  # миграция старой базы: если колонка уже есть, это нормально
                 self.c.execute(stmt)
@@ -47,7 +48,17 @@ class DB:
         self.c.execute("INSERT OR IGNORE INTO users(id, name, allowed) VALUES(?,?,0)", (uid, name))
         if allowed is not None:
             self.c.execute("UPDATE users SET allowed=? WHERE id=?", (int(allowed), uid))
+            if allowed:
+                self.c.execute("UPDATE users SET denied=0 WHERE id=?", (uid,))
         self.c.commit()
+
+    def set_denied(self, uid: int, denied: bool = True):
+        self.c.execute("UPDATE users SET denied=?, allowed=0 WHERE id=?", (int(denied), uid))
+        self.c.commit()
+
+    def is_denied(self, uid: int) -> bool:
+        r = self.c.execute("SELECT denied FROM users WHERE id=?", (uid,)).fetchone()
+        return bool(r and r["denied"])
 
     def is_allowed(self, uid: int) -> bool:
         r = self.c.execute("SELECT allowed FROM users WHERE id=?", (uid,)).fetchone()

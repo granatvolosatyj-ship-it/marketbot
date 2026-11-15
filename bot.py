@@ -38,9 +38,64 @@ def has_access(uid: int) -> bool:
     return uid == config.ADMIN_ID or db.is_allowed(uid)
 
 
+requested: set[int] = set()  # кому админу уже отправили заявку (в этом запуске)
+
+
 async def deny(m: Message):
-    db.ensure_user(m.from_user.id, m.from_user.full_name or "")
-    await m.answer(f"Нет доступа. Твой ID: <code>{m.from_user.id}</code>. Отправь его админу.")
+    """Нет доступа: человеку пишем его ID, админу присылаем заявку с кнопками «Принять» / «Отклонить»."""
+    u = m.from_user
+    db.ensure_user(u.id, u.full_name or "")
+    if db.is_denied(u.id):
+        return  # админ уже отклонил: молчим
+    await m.answer(
+        f"Нет доступа. Заявка отправлена админу, жди ответа. Твой ID: <code>{u.id}</code>."
+    )
+    if u.id in requested or not config.ADMIN_ID:
+        return
+    requested.add(u.id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Принять", callback_data=f"acc:{u.id}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rej:{u.id}"),
+    ]])
+    uname = f"@{u.username}" if u.username else "без username"
+    try:
+        await m.bot.send_message(
+            config.ADMIN_ID,
+            "🔔 <b>Новая заявка на доступ</b>\n"
+            f"Имя: {html.escape(u.full_name or '—')}\n{html.escape(uname)}\nID: <code>{u.id}</code>",
+            reply_markup=kb,
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("acc:"))
+async def request_accept(c: CallbackQuery):
+    if c.from_user.id != config.ADMIN_ID:
+        return await c.answer()
+    uid = int(c.data.split(":")[1])
+    db.ensure_user(uid, allowed=True)
+    requested.discard(uid)
+    await c.message.edit_text(c.message.html_text + "\n\n✅ <b>Принят</b>")
+    await c.answer("Доступ выдан")
+    try:
+        await c.bot.send_message(uid, "✅ Админ принял заявку. Нажми /start, чтобы начать.")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("rej:"))
+async def request_reject(c: CallbackQuery):
+    if c.from_user.id != config.ADMIN_ID:
+        return await c.answer()
+    uid = int(c.data.split(":")[1])
+    db.set_denied(uid, True)
+    await c.message.edit_text(c.message.html_text + "\n\n❌ <b>Отклонён</b>")
+    await c.answer("Отклонено")
+    try:
+        await c.bot.send_message(uid, "❌ Админ отклонил заявку на доступ.")
+    except Exception:
+        pass
 
 
 BTN_FILTER = "➕ Добавить бренд"
