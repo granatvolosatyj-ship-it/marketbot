@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 import config
@@ -54,21 +55,25 @@ def format_caption(item: Item, source: Source, brand: str, rates: Rates) -> str:
     )
 
 
-async def send(bot: Bot, uid: int, item: Item, caption: str):
+async def send(bot: Bot, uid: int, item: Item, caption: str, kb: InlineKeyboardMarkup | None = None):
     for _ in range(3):
         try:
             if item.photo:
                 try:
-                    await bot.send_photo(uid, item.photo, caption=caption)
+                    await bot.send_photo(uid, item.photo, caption=caption, reply_markup=kb)
                     return
                 except TelegramBadRequest:
                     pass  # плохое фото: шлём текстом
-            await bot.send_message(uid, caption, disable_web_page_preview=False)
+            await bot.send_message(uid, caption, disable_web_page_preview=False, reply_markup=kb)
             return
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
         except TelegramForbiddenError:
             return  # пользователь заблокировал бота
+        except TelegramBadRequest:
+            if kb is None:
+                return
+            kb = None  # вдруг кнопка с неверной ссылкой: шлём без кнопок
 
 
 def dedup_key(source: Source, item) -> str:
@@ -86,7 +91,7 @@ async def process(db: DB, bot: Bot, rates: Rates, source: Source, brand: str, qu
     if first_time:
         db.set_baselined(source.code, query)  # старые объявления не шлём
         for i in new:
-            for uid, _ in users:
+            for uid, *_ in users:
                 db.claim_sent(uid, dedup_key(source, i))
         return
     fresh = [i for i in new if not i.created or time.time() - i.created < MAX_AGE]  # старые объявления не шлём
@@ -94,7 +99,7 @@ async def process(db: DB, bot: Bot, rates: Rates, source: Source, brand: str, qu
         caption = format_caption(i, source, brand, rates)
         key = dedup_key(source, i)
         rub = rates.to_rub(i.price, i.currency)
-        for uid, limit in users:
+        for uid, limit, sub_id in users:
             if limit and rub is not None and rub > limit:
                 continue  # дороже лимита цены
             if db.claim_sent(uid, key):  # одно и то же объявление в другой стране/по другому бренду не шлём

@@ -23,14 +23,13 @@ ready = [s for s in sources if s.ready]
 router = Router()
 
 HELP = (
-    "Напиши название бренда (например <b>Nike</b>). Я спрошу максимальную цену и на каких площадках "
-    "искать, и начну присылать новые объявления с этого момента.\n\n"
-    "/list: мои бренды: выбрать, на каких площадках искать каждый бренд, или удалить\n"
-    "/countries: включить или выключить площадки сразу для всех брендов\n"
-    "/limit: поставить лимит цены (бот спросит сумму в рублях)\n"
-    "/stop: поставить уведомления на паузу\n"
-    "/resume: снова включить\n"
-    "/help: эта подсказка"
+    "Напиши название бренда (например <b>Nike</b>) или нажми «➕ Добавить бренд». Я спрошу максимальную цену "
+    "и на каких площадках искать, и начну присылать новые объявления с этого момента.\n\n"
+    "Кнопки внизу:\n"
+    "📋 Мои бренды: настроить каждый бренд (где искать, лимит цены) или удалить\n"
+    "💰 Лимит цены: общий лимит или для одного бренда (бот спросит сумму в рублях)\n"
+    "🌍 Страны и площадки: включить или выключить площадки сразу для всех брендов\n"
+    "⏸ Пауза / ▶️ Старт: остановить и снова включить уведомления\n"
 )
 ADMIN_HELP = "\n\nАдмин:\n/allow ID: дать доступ\n/deny ID: забрать доступ\n/users: список"
 
@@ -44,9 +43,10 @@ async def deny(m: Message):
     await m.answer(f"Нет доступа. Твой ID: <code>{m.from_user.id}</code>. Отправь его админу.")
 
 
+BTN_FILTER = "➕ Добавить бренд"
 BTN_BRANDS = "📋 Мои бренды"
 BTN_LIMIT = "💰 Лимит цены"
-BTN_WHERE = "🌍 Площадки"
+BTN_WHERE = "🌍 Страны и площадки"
 BTN_PAUSE = "⏸ Пауза"
 BTN_RESUME = "▶️ Старт"
 BTN_TEST = "🧪 Тест"
@@ -55,8 +55,9 @@ BTN_HELP = "❓ Помощь"
 
 def menu_kb(uid: int) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text=BTN_BRANDS), KeyboardButton(text=BTN_LIMIT)],
-        [KeyboardButton(text=BTN_WHERE), KeyboardButton(text=BTN_HELP)],
+        [KeyboardButton(text=BTN_FILTER), KeyboardButton(text=BTN_BRANDS)],
+        [KeyboardButton(text=BTN_LIMIT), KeyboardButton(text=BTN_WHERE)],
+        [KeyboardButton(text=BTN_HELP)],
         [KeyboardButton(text=BTN_PAUSE), KeyboardButton(text=BTN_RESUME)],
     ]
     if uid == config.ADMIN_ID:
@@ -296,6 +297,7 @@ def brand_kb(sub_id: int, done: bool = False) -> InlineKeyboardMarkup:
     if done:
         rows.append([InlineKeyboardButton(text="✅ Готово", callback_data=f"nd:{sub_id}")])
     else:
+        rows.append([InlineKeyboardButton(text="💰 Лимит цены для этого бренда", callback_data=f"lim:{sub_id}")])
         rows.append([InlineKeyboardButton(text="⬅️ К списку брендов", callback_data="bl")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -581,16 +583,20 @@ async def peek(m: Message, command: CommandObject):
 
 
 # ---------- любой текст = новый бренд
+
 def _cmd(name: str) -> CommandObject:
     return CommandObject(prefix="/", command=name, mention=None, args=None)
 
 
-@router.message(F.text.in_({BTN_BRANDS, BTN_LIMIT, BTN_WHERE, BTN_PAUSE, BTN_RESUME, BTN_TEST, BTN_HELP}))
+@router.message(F.text.in_({BTN_FILTER, BTN_BRANDS, BTN_LIMIT, BTN_WHERE, BTN_PAUSE, BTN_RESUME, BTN_TEST, BTN_HELP}))
 async def menu_buttons(m: Message):
     if not has_access(m.from_user.id):
         return await deny(m)
     pending.pop(m.from_user.id, None)  # нажали кнопку меню: отменяем ввод суммы
     t = m.text
+    if t == BTN_FILTER:
+        return await m.answer("Напиши название бренда (например <b>Nike</b> или <b>Stone Island</b>). "
+                              "Потом я спрошу максимальную цену и на каких площадках искать.")
     if t == BTN_BRANDS:
         return await list_subs(m)
     if t == BTN_LIMIT:

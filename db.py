@@ -1,4 +1,5 @@
 import sqlite3
+import time
 
 
 class DB:
@@ -22,6 +23,11 @@ class DB:
                 user_id INTEGER, key TEXT, PRIMARY KEY(user_id, key));
             CREATE TABLE IF NOT EXISTS baselined(
                 source TEXT, term TEXT, PRIMARY KEY(source, term));
+            CREATE TABLE IF NOT EXISTS muted(
+                sub_id INTEGER PRIMARY KEY, until REAL);
+            CREATE TABLE IF NOT EXISTS favs(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+                caption TEXT, photo TEXT, url TEXT, created REAL);
             """
         )
         for stmt in (
@@ -124,17 +130,47 @@ class DB:
         ).fetchall()
         return [r["brand"] for r in rows]
 
-    def subscribers(self, brand: str, source: str) -> list[tuple[int, float | None]]:
-        """(id пользователя, лимит цены в ₽ или None). Остановленные (/stop) не включаются."""
+    def subscribers(self, brand: str, source: str) -> list[tuple[int, float | None, int]]:
+        """(id пользователя, лимит цены в ₽ или None, id подписки). Без остановленных (/stop) и скрытых на время."""
         rows = self.c.execute(
-            """SELECT s.user_id, COALESCE(s.max_rub, u.max_rub) AS lim
+            """SELECT s.user_id, COALESCE(s.max_rub, u.max_rub) AS lim, s.id AS sid
                FROM subs s JOIN users u ON u.id=s.user_id
                WHERE s.brand=? AND u.allowed=1 AND COALESCE(u.paused,0)=0
                AND NOT EXISTS (SELECT 1 FROM disabled d WHERE d.user_id=s.user_id AND d.source=?)
-               AND NOT EXISTS (SELECT 1 FROM sub_disabled sd WHERE sd.sub_id=s.id AND sd.source=?)""",
-            (brand, source, source),
+               AND NOT EXISTS (SELECT 1 FROM sub_disabled sd WHERE sd.sub_id=s.id AND sd.source=?)
+               AND NOT EXISTS (SELECT 1 FROM muted m WHERE m.sub_id=s.id AND m.until>?)""",
+            (brand, source, source, time.time()),
         ).fetchall()
-        return [(r["user_id"], r["lim"]) for r in rows]
+        return [(r["user_id"], r["lim"], r["sid"]) for r in rows]
+
+    # скрыть бренд на время
+    def mute(self, sub_id: int, seconds: int):
+        self.c.execute("INSERT OR REPLACE INTO muted(sub_id, until) VALUES(?,?)", (sub_id, time.time() + seconds))
+        self.c.commit()
+
+    def unmute(self, sub_id: int):
+        self.c.execute("DELETE FROM muted WHERE sub_id=?", (sub_id,))
+        self.c.commit()
+
+    # избранное
+    def add_fav(self, uid: int, caption: str, photo: str | None, url: str | None):
+        if url and self.c.execute("SELECT 1 FROM favs WHERE user_id=? AND url=?", (uid, url)).fetchone():
+            return False
+        self.c.execute(
+            "INSERT INTO favs(user_id, caption, photo, url, created) VALUES(?,?,?,?,?)",
+            (uid, caption, photo, url, time.time()),
+        )
+        self.c.commit()
+        return True
+
+    def list_favs(self, uid: int, limit: int = 10):
+        return self.c.execute(
+            "SELECT * FROM favs WHERE user_id=? ORDER BY id DESC LIMIT ?", (uid, limit)
+        ).fetchall()
+
+    def del_fav(self, uid: int, fav_id: int):
+        self.c.execute("DELETE FROM favs WHERE user_id=? AND id=?", (uid, fav_id))
+        self.c.commit()
 
     # seen / baseline
     def is_baselined(self, source: str, term: str) -> bool:
