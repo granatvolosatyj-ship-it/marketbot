@@ -133,8 +133,64 @@ async def limit_pick(c: CallbackQuery):
     await c.answer()
     await c.message.answer(
         f"Напиши максимальную цену в рублях для {target}. Например: <b>5000</b>\n"
-        "Чтобы убрать лимит, напиши <b>off</b>. Отмена: /cancel"
+        "Чтобы убрать лимит, напиши <b>off</b>.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cin")]]),
     )
+
+
+def step1_kb(sub_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="♾ Без лимита", callback_data=f"nl:{sub_id}")],
+        [InlineKeyboardButton(text="❌ Отмена (не добавлять бренд)", callback_data=f"nc:{sub_id}")],
+    ])
+
+
+def step1_text(brand: str) -> str:
+    return (
+        f"<b>{html.escape(brand)}</b>\n\n"
+        "Шаг 1 из 2. До какой цены искать? Напиши максимальную цену в рублях (например <b>5000</b>) "
+        "или нажми «Без лимита»."
+    )
+
+
+@router.callback_query(F.data.startswith("nc:"))
+async def new_cancel(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    pending.pop(c.from_user.id, None)
+    sub = db.get_sub(c.from_user.id, int(c.data.split(":")[1]))
+    if sub:
+        db.del_sub(c.from_user.id, sub["id"])
+    await c.message.edit_text(f"Отменено. Бренд «{html.escape(sub['brand'])}» не добавлен." if sub else "Отменено.")
+    await c.answer("Отменено")
+
+
+@router.callback_query(F.data.startswith("nb:"))
+async def new_back(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    sub = db.get_sub(c.from_user.id, int(c.data.split(":")[1]))
+    if not sub:
+        return await c.answer("Бренд уже удалён")
+    pending[c.from_user.id] = f"new:{sub['id']}"
+    await c.message.edit_text(step1_text(sub["brand"]), reply_markup=step1_kb(sub["id"]))
+    await c.answer()
+
+
+@router.callback_query(F.data == "cin")
+async def cancel_input(c: CallbackQuery):
+    pending.pop(c.from_user.id, None)
+    await c.message.edit_text("Отменено.")
+    await c.answer()
+
+
+@router.callback_query(F.data == "close")
+async def close_msg(c: CallbackQuery):
+    try:
+        await c.message.delete()
+    except Exception:
+        await c.message.edit_reply_markup(reply_markup=None)
+    await c.answer()
 
 
 def step2_text(sub, amount) -> str:
@@ -233,6 +289,7 @@ async def limit(m: Message, command: CommandObject):
         lines.append("\nДля чего поставить лимит? Нажми кнопку, потом напиши сумму в рублях.")
         rows = [[InlineKeyboardButton(text="🌐 Для всех брендов", callback_data="lim:all")]]
         rows += [[InlineKeyboardButton(text=f"💰 {s['brand']}", callback_data=f"lim:{s['id']}")] for s in db.user_subs(uid)]
+        rows.append([InlineKeyboardButton(text="⬅️ Закрыть", callback_data="close")])
         return await m.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     parts = args.split()
     last = parts[-1].lower()
@@ -280,6 +337,7 @@ def list_kb(uid: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🗑", callback_data=f"del:{s['id']}"),
             ]
         )
+    rows.append([InlineKeyboardButton(text="⬅️ Закрыть", callback_data="close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -348,6 +406,10 @@ def brand_kb(sub_id: int, done: bool = False) -> InlineKeyboardMarkup:
     )
     if done:
         rows.append([InlineKeyboardButton(text="✅ Готово", callback_data=f"nd:{sub_id}")])
+        rows.append([
+            InlineKeyboardButton(text="⬅️ Назад к цене", callback_data=f"nb:{sub_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"nc:{sub_id}"),
+        ])
     else:
         rows.append([InlineKeyboardButton(text="💰 Лимит цены для этого бренда", callback_data=f"lim:{sub_id}")])
         rows.append([InlineKeyboardButton(text="⬅️ К списку брендов", callback_data="bl")])
@@ -447,6 +509,7 @@ def countries_kb(uid: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="❌ Выключить все", callback_data="all:off"),
         ]
     )
+    rows.append([InlineKeyboardButton(text="⬅️ Закрыть", callback_data="close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -671,15 +734,8 @@ async def add_brand(m: Message):
     if db.add_sub(uid, brand, setup=True):
         sub = next(s for s in db.user_subs(uid) if s["brand"] == brand)
         pending[uid] = f"new:{sub['id']}"
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="♾ Без лимита", callback_data=f"nl:{sub['id']}")]]
-        )
-        await m.answer(
-            f"Добавил <b>{html.escape(brand)}</b> ✅\n\n"
-            "Шаг 1 из 2. До какой цены искать? Напиши максимальную цену в рублях (например <b>5000</b>) "
-            "или нажми «Без лимита».",
-            reply_markup=kb,
-        )
+        await m.answer(f"Добавил <b>{html.escape(brand)}</b> ✅\n\n" + step1_text(brand).split("\n\n", 1)[1],
+                       reply_markup=step1_kb(sub["id"]))
     else:
         await m.answer("Этот бренд уже в списке.")
 
