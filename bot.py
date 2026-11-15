@@ -474,7 +474,7 @@ async def test_sources(m: Message):
             return f"✅ {s.label}: {len(items)} объявл."
         except Exception as e:
             resp = getattr(e, "response", None)
-            code = f"HTTP {resp.status_code}" if resp is not None else (str(e)[:90] or type(e).__name__)
+            code = f"HTTP {resp.status_code}" if resp is not None else html.escape(str(e)[:90] or type(e).__name__)
             line = f"❌ {s.label}: {code}"
             if resp is not None and s.code in ("vinted_fr", "bunjang", "2ndstreet_jp"):
                 body = " ".join(resp.text.split())[:160]
@@ -482,8 +482,19 @@ async def test_sources(m: Message):
                 line += f"\n   сервер: {html.escape(server)}\n   ответ: {html.escape(body)}"
             return line
 
-    lines = await asyncio.gather(*(check(s) for s in ready))
-    await wait.edit_text("Результат проверки (запрос «nike»):\n" + "\n".join(lines))
+    async def safe(s):
+        try:
+            return await asyncio.wait_for(check(s), timeout=40)
+        except BaseException as e:  # что бы ни случилось, отчёт всё равно придёт
+            return f"❌ {s.label}: {html.escape(type(e).__name__)}"
+
+    lines = await asyncio.gather(*(safe(s) for s in ready))
+    text = "Результат проверки (запрос «nike»):\n" + "\n".join(lines)
+    try:
+        await wait.edit_text(text)
+    except Exception:
+        import re as _re
+        await m.answer(_re.sub(r"<[^>]*>", "", text), parse_mode=None)
 
 
 # ---------- диагностика: показывает, что реально отдаёт страница поиска
