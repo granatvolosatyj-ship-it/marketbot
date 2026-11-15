@@ -635,16 +635,33 @@ class Bunjang(CardSource):
         bodies = await self._scripts(term)
         Bunjang._policy = self._policy_keys(bodies)
         lines = [f"policyKey в скриптах: {Bunjang._policy[:8] or 'не найден'}"]
+        try:
+            page = (await self.get(f"{self.base}/search/products?q={term}&order=date",
+                                   headers={"Accept": "text/html", "Accept-Language": "ko,en;q=0.8"})).text
+        except Exception:
+            page = ""
+        bodies = [page] + bodies
+        needles = ("policyKey", "policy_key", "searchPolicy", "policyId", "POLICY")
+        lines.append("размеры: " + ", ".join(str(len(x)) for x in bodies[:12]) + f"; всего {len(bodies)}")
+        seen_ctx = set()
+        for needle in needles:
+            n = sum(x.count(needle) for x in bodies)
+            lines.append(f"«{needle}»: {n} раз")
         shown = 0
         for body in bodies:
-            for m in re.finditer(r"policyKey", body):
-                ctx = " ".join(body[max(0, m.start() - 120): m.start() + 200].split())
-                if re.search(r"policyKey\s*[:=]\s*[\"'`]", ctx) or shown == 0:
+            for needle in needles:
+                for m in re.finditer(needle, body):
+                    ctx = " ".join(body[max(0, m.start() - 60): m.start() + 110].split())
+                    if "policyKey:e.policyKey" in ctx or ctx[:40] in seen_ctx:
+                        continue
+                    seen_ctx.add(ctx[:40])
                     lines.append("JS: " + ctx)
                     shown += 1
-                if shown >= 3:
+                    if shown >= 10:
+                        break
+                if shown >= 10:
                     break
-            if shown >= 3:
+            if shown >= 10:
                 break
         items, report = await self._api(term)
         lines.append(f"Итого товаров: {len(items)}")
