@@ -12,6 +12,7 @@ from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton, Inli
 import config
 from currency import Rates
 from db import DB
+import avito
 from poller import run_poller
 from sources import build_sources
 
@@ -410,35 +411,47 @@ def source_title(s) -> str:
     return s.label
 
 
-def source_rows(off: set[str], cb) -> list[list[InlineKeyboardButton]]:
-    """Все площадки отдельно, по разделам: Vinted по странам, Япония, Корея, Китай."""
-    sections = [
-        ("🇪🇺 VINTED · ПО СТРАНАМ", lambda s: s.code.startswith("vinted_")),
-        ("🇯🇵 ЯПОНИЯ", lambda s: s.code.endswith("_jp")),
-        ("🇰🇷 КОРЕЯ", lambda s: s.code.endswith("_kr") or s.code == "bunjang"),
-        ("🇨🇳 КИТАЙ", lambda s: s.code.endswith("_cn")),
-    ]
+SECTIONS = [
+    ("vt", "🇪🇺 VINTED", lambda s: s.code.startswith("vinted_")),
+    ("jp", "🇯🇵 ЯПОНИЯ", lambda s: s.code.endswith("_jp")),
+    ("kr", "🇰🇷 КОРЕЯ", lambda s: s.code.endswith("_kr") or s.code == "bunjang"),
+    ("cn", "🇨🇳 КИТАЙ", lambda s: s.code.endswith("_cn")),
+]
+
+
+def shown_sources():
+    return [s for s in ready if s.code != "2ndstreet_jp"]  # 2nd STREET пока не работает
+
+
+def group_codes(key: str) -> list[str]:
+    fits = next(f for k, _, f in SECTIONS if k == key)
+    return [s.code for s in shown_sources() if fits(s)]
+
+
+def source_rows(off: set[str], cb, hcb) -> list[list[InlineKeyboardButton]]:
+    """Заголовки (нажатие включает/выключает всю группу) и под ними страны по две в ряд."""
     rows, used = [], set()
-    shown = [s for s in ready if s.code != "2ndstreet_jp"]  # пока не работает: не показываем
-    for title, fits in sections:
+    shown = shown_sources()
+    for key, title, fits in SECTIONS:
         group = [s for s in shown if fits(s) and s.code not in used]
         if not group:
             continue
         used.update(s.code for s in group)
+        n_off = sum(1 for s in group if s.code in off)
+        mark = "✅" if n_off == 0 else ("❌" if n_off == len(group) else "🔸")
+        rows.append([InlineKeyboardButton(text=f"{mark} {title} · все сразу", callback_data=hcb(key))])
         row = []
         for s in group:
-            mark = "❌" if s.code in off else "✅"
-            row.append(InlineKeyboardButton(text=f"{mark} {s.flag} {source_title(s)}", callback_data=cb(s.code)))
+            m = "❌" if s.code in off else "✅"
+            row.append(InlineKeyboardButton(text=f"{m} {s.flag} {source_title(s)}", callback_data=cb(s.code)))
             if len(row) == 2:
                 rows.append(row)
                 row = []
         if row:
             rows.append(row)
-    rest = [s for s in shown if s.code not in used]
-    if rest:
-        for s in rest:
-            mark = "❌" if s.code in off else "✅"
-            rows.append([InlineKeyboardButton(text=f"{mark} {s.flag} {s.label}", callback_data=cb(s.code))])
+    for s in [s for s in shown if s.code not in used]:
+        m = "❌" if s.code in off else "✅"
+        rows.append([InlineKeyboardButton(text=f"{m} {s.flag} {s.label}", callback_data=cb(s.code))])
     return rows
 
 
@@ -450,7 +463,7 @@ async def noop(c: CallbackQuery):
 def brand_kb(sub_id: int, done: bool = False) -> InlineKeyboardMarkup:
     done = done or db.is_setup(sub_id)  # бренд ещё не настроен: показываем «Готово»
     off = db.brand_disabled(sub_id)
-    rows = source_rows(off, lambda code: f"bt:{sub_id}:{code}")
+    rows = source_rows(off, lambda code: f"bt:{sub_id}:{code}", lambda k: f"bg:{sub_id}:{k}")
     rows.append(
         [
             InlineKeyboardButton(text="🌍 Все", callback_data=f"bp:{sub_id}:all"),
@@ -458,6 +471,10 @@ def brand_kb(sub_id: int, done: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🇯🇵🇰🇷 Азия", callback_data=f"bp:{sub_id}:asia"),
         ]
     )
+    av = db.get_avito(sub_id)
+    rows.append([InlineKeyboardButton(
+        text="🇷🇺 Авито: настроено ✅ (изменить)" if av else "🇷🇺 Добавить поиск на Авито",
+        callback_data=f"av:{sub_id}")])
     if done:
         rows.append([InlineKeyboardButton(text="✅ Готово", callback_data=f"nd:{sub_id}")])
         rows.append([
@@ -533,6 +550,39 @@ async def brand_toggle(c: CallbackQuery):
     await c.answer("Включено ✅" if now_on else "Выключено ❌")  # сразу убирает «часики»
 
 
+@router.callback_query(F.data.startswith("bg:"))
+async def brand_group(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    _, sid, key = c.data.split(":")
+    sub = db.get_sub(c.from_user.id, int(sid))
+    if not sub:
+        return await c.answer()
+    codes = set(group_codes(key))
+    off = db.brand_disabled(sub["id"])
+    all_on = not (codes & off)  # все включены -> выключаем, иначе включаем все
+    off = (off | codes) if all_on else (off - codes)
+    db.set_brand_sources(sub["id"], off)
+    await c.message.edit_reply_markup(reply_markup=brand_kb(sub["id"]))
+    await c.answer("Группа выключена ❌" if all_on else "Группа включена ✅")
+
+
+@router.callback_query(F.data.startswith("gg:"))
+async def global_group(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    codes = group_codes(c.data.split(":")[1])
+    off = db.disabled_sources(c.from_user.id)
+    all_on = not (set(codes) & off)
+    for code in codes:
+        db.set_source(c.from_user.id, code, not all_on)
+    await c.answer("Группа выключена ❌" if all_on else "Группа включена ✅")
+    try:
+        await c.message.edit_reply_markup(reply_markup=countries_kb(c.from_user.id))
+    except Exception:
+        pass
+
+
 @router.callback_query(F.data.startswith("bp:"))
 async def brand_preset(c: CallbackQuery):
     if not has_access(c.from_user.id):
@@ -556,7 +606,7 @@ async def brand_preset(c: CallbackQuery):
 # ---------- страны
 def countries_kb(uid: int) -> InlineKeyboardMarkup:
     off = db.disabled_sources(uid)
-    rows = source_rows(off, lambda code: f"tg:{code}")
+    rows = source_rows(off, lambda code: f"tg:{code}", lambda k: f"gg:{k}")
     rows.append(
         [
             InlineKeyboardButton(text="✅ Включить все", callback_data="all:on"),
@@ -674,7 +724,14 @@ async def test_sources(m: Message):
         except BaseException as e:  # что бы ни случилось, отчёт всё равно придёт
             return f"❌ {s.label}: {html.escape(type(e).__name__)}"
 
-    lines = await asyncio.gather(*(safe(s) for s in ready))
+    async def av_check():
+        try:
+            n = len(await asyncio.wait_for(avito.search("nike"), timeout=30))
+            return f"✅ Авито: {n} объявл."
+        except BaseException as e:
+            return f"❌ Авито: {html.escape(str(e)[:120] or type(e).__name__)}"
+
+    lines = await asyncio.gather(*(safe(s) for s in ready), av_check())
     text = "Результат проверки (запрос «nike»):\n" + "\n".join(lines)
     try:
         await wait.edit_text(text)
@@ -732,6 +789,13 @@ async def peek(m: Message, command: CommandObject):
     if not is_admin(m):
         return
     key = (command.args or "").strip().lower()
+    if key.startswith("avito") or key.startswith("авито"):
+        await m.answer("Смотрю Авито, подожди до 40 секунд...")
+        try:
+            text = await asyncio.wait_for(avito.diag("nike"), timeout=40)
+        except Exception as e:
+            text = f"Ошибка: {e!r}"
+        return await m.answer(html.escape(text)[:3800])
     for s in ready:
         if key and key in s.code and hasattr(s, "diag"):
             await m.answer("Смотрю, подожди до 40 секунд...")
@@ -741,6 +805,241 @@ async def peek(m: Message, command: CommandObject):
                 text = f"Ошибка: {e!r}"
             return await m.answer(html.escape(text)[:3800])
     await m.answer("Формат: /peek bunjang, /peek fruits, /peek vinted или /peek 2nd")
+
+
+# ---------- Авито: 3 вопроса (регион, категория, цена)
+def _btn(text, data):
+    return InlineKeyboardButton(text=text, callback_data=data)
+
+
+def av_summary(sub, av) -> str:
+    lim = f"до {av['max_rub']:,.0f} ₽".replace(",", " ") if av["max_rub"] else "без лимита"
+    return (f"🇷🇺 <b>Авито</b> для «{html.escape(sub['brand'])}»\n"
+            f"Где: {avito.region_name(av['region'])}\n"
+            f"Категория: {avito.cat_name(av['cat'])}\n"
+            f"Цена: {lim}")
+
+
+def av_q1(sub) -> tuple[str, InlineKeyboardMarkup]:
+    return (f"🇷🇺 Авито · <b>{html.escape(sub['brand'])}</b>\n\n<b>Вопрос 1/3.</b> Где искать?",
+            InlineKeyboardMarkup(inline_keyboard=[
+                [_btn("🇷🇺 Все регионы", f"avr:{sub['id']}:all")],
+                [_btn("📍 Определённый регион", f"avr:{sub['id']}:pick")],
+                [_btn("⬅️ Назад", f"bpn:{sub['id']}")],
+            ]))
+
+
+def av_q2(sub) -> tuple[str, InlineKeyboardMarkup]:
+    return (f"🇷🇺 Авито · <b>{html.escape(sub['brand'])}</b>\n\n<b>Вопрос 2/3.</b> Какая категория?",
+            InlineKeyboardMarkup(inline_keyboard=[
+                [_btn("📦 Все категории", f"avk:{sub['id']}:all")],
+                [_btn("🎯 Что-то конкретное", f"avk:{sub['id']}:pick")],
+                [_btn("⬅️ Назад", f"avs:{sub['id']}")],
+            ]))
+
+
+def av_q3(sub) -> tuple[str, InlineKeyboardMarkup]:
+    return (f"🇷🇺 Авито · <b>{html.escape(sub['brand'])}</b>\n\n<b>Вопрос 3/3.</b> До какой цены?",
+            InlineKeyboardMarkup(inline_keyboard=[
+                [_btn("♾ Без лимита", f"avl:{sub['id']}:none")],
+                [_btn("💰 Определённый лимит", f"avl:{sub['id']}:set")],
+                [_btn("⬅️ Назад", f"avk:{sub['id']}:back")],
+            ]))
+
+
+avd: dict[int, dict] = {}  # черновик настроек Авито: {"sub": id, "region": ..., "cat": ...}
+
+
+def _av_sub(c_or_m, sid: str):
+    return db.get_sub(c_or_m.from_user.id, int(sid))
+
+
+async def av_finish(uid: int, sub, max_rub, send_fn):
+    d = avd.pop(uid, {})
+    db.set_avito(sub["id"], d.get("region"), d.get("cat"), max_rub)
+    av = db.get_avito(sub["id"])
+    await send_fn(av_summary(sub, av) + "\n\n✅ Сохранено. Пришлю только то, что появится после этого.",
+                  InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ К настройкам бренда", f"bpn:{sub['id']}")]]))
+
+
+@router.callback_query(F.data.startswith("bpn:"))
+async def av_back_panel(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    pending.pop(c.from_user.id, None)
+    sub = _av_sub(c, c.data.split(":")[1])
+    if not sub:
+        return await c.answer("Бренд уже удалён")
+    await c.message.edit_text(brand_text(sub), reply_markup=brand_kb(sub["id"]))
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("av:"))
+async def av_open(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    sub = _av_sub(c, c.data.split(":")[1])
+    if not sub:
+        return await c.answer("Бренд уже удалён")
+    av = db.get_avito(sub["id"])
+    if av:
+        await c.message.edit_text(av_summary(sub, av), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [_btn("✏️ Настроить заново", f"avs:{sub['id']}")],
+            [_btn("🚫 Выключить Авито для бренда", f"avo:{sub['id']}")],
+            [_btn("⬅️ Назад", f"bpn:{sub['id']}")],
+        ]))
+    else:
+        avd[c.from_user.id] = {"sub": sub["id"], "region": None, "cat": None}
+        text, kb = av_q1(sub)
+        await c.message.edit_text(text, reply_markup=kb)
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("avs:"))
+async def av_restart(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    sub = _av_sub(c, c.data.split(":")[1])
+    if not sub:
+        return await c.answer("Бренд уже удалён")
+    pending.pop(c.from_user.id, None)
+    avd[c.from_user.id] = {"sub": sub["id"], "region": None, "cat": None}
+    text, kb = av_q1(sub)
+    await c.message.edit_text(text, reply_markup=kb)
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("avo:"))
+async def av_off(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    sub = _av_sub(c, c.data.split(":")[1])
+    if not sub:
+        return await c.answer("Бренд уже удалён")
+    db.del_avito(sub["id"])
+    await c.message.edit_text(brand_text(sub), reply_markup=brand_kb(sub["id"]))
+    await c.answer("Авито выключен для бренда")
+
+
+def _draft(uid: int, sub) -> dict:
+    d = avd.get(uid)
+    if not d or d.get("sub") != sub["id"]:
+        d = avd[uid] = {"sub": sub["id"], "region": None, "cat": None}
+    return d
+
+
+@router.callback_query(F.data.startswith("avr:"))
+async def av_region(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    _, sid, val = c.data.split(":", 2)
+    sub = _av_sub(c, sid)
+    if not sub:
+        return await c.answer("Бренд уже удалён")
+    d = _draft(c.from_user.id, sub)
+    pending.pop(c.from_user.id, None)
+    if val == "pick":
+        rows, row = [], []
+        for slug in avito.TOP_REGIONS:
+            row.append(_btn(avito.REGIONS[slug], f"avr:{sid}:{slug}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([_btn("✍️ Другой город (напишу)", f"avr:{sid}:type")])
+        rows.append([_btn("⬅️ Назад", f"avs:{sid}")])
+        await c.message.edit_text(
+            f"🇷🇺 Авито · <b>{html.escape(sub['brand'])}</b>\n\n<b>Вопрос 1/3.</b> Какой регион?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        return await c.answer()
+    if val == "type":
+        pending[c.from_user.id] = f"avcity:{sid}"
+        await c.message.edit_text(
+            "Напиши название города или области, например: <b>Казань</b> или <b>Московская область</b>.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ Назад", f"avr:{sid}:pick")]]))
+        return await c.answer()
+    d["region"] = None if val == "all" else val
+    text, kb = av_q2(sub)
+    await c.message.edit_text(text, reply_markup=kb)
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("avk:"))
+async def av_category(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    _, sid, val = c.data.split(":", 2)
+    sub = _av_sub(c, sid)
+    if not sub:
+        return await c.answer("Бренд уже удалён")
+    d = _draft(c.from_user.id, sub)
+    if val == "back":
+        text, kb = av_q2(sub)
+    elif val == "pick":
+        rows = [[_btn(name, f"avk:{sid}:{slug}")] for slug, name in avito.CATEGORIES.items()]
+        rows.append([_btn("⬅️ Назад", f"avk:{sid}:back")])
+        text = (f"🇷🇺 Авито · <b>{html.escape(sub['brand'])}</b>\n\n"
+                "<b>Вопрос 2/3.</b> Что именно ищем?")
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    else:
+        d["cat"] = None if val == "all" else (val if val in avito.CATEGORIES else None)
+        text, kb = av_q3(sub)
+    await c.message.edit_text(text, reply_markup=kb)
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("avl:"))
+async def av_limit(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    _, sid, val = c.data.split(":", 2)
+    sub = _av_sub(c, sid)
+    if not sub:
+        return await c.answer("Бренд уже удалён")
+    _draft(c.from_user.id, sub)
+    if val == "set":
+        pending[c.from_user.id] = f"avlim:{sid}"
+        await c.message.edit_text(
+            "Напиши максимальную цену в рублях, например: <b>5000</b>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ Назад", f"avk:{sid}:back")]]))
+        return await c.answer()
+    pending.pop(c.from_user.id, None)
+
+    async def out(text, kb):
+        await c.message.edit_text(text, reply_markup=kb)
+
+    await av_finish(c.from_user.id, sub, None, out)
+    await c.answer("Сохранено")
+
+
+async def av_text_input(m: Message, what: str):
+    """Ответ текстом на вопросы Авито: город или сумма."""
+    uid = m.from_user.id
+    kind, sid = what.split(":", 1)
+    sub = db.get_sub(uid, int(sid))
+    if not sub:
+        pending.pop(uid, None)
+        return await m.answer("Бренд уже удалён.")
+    d = _draft(uid, sub)
+    if kind == "avcity":
+        slug = avito.region_by_text(m.text)
+        if not slug:
+            return await m.answer("Такой город не нашёл. Напиши по-другому (например «Казань») или выбери из списка кнопкой «Назад».")
+        pending.pop(uid, None)
+        d["region"] = slug
+        text, kb = av_q2(sub)
+        return await m.answer(f"Регион: {avito.region_name(slug)} ✅\n\n" + text, reply_markup=kb)
+    t = m.text.strip().lower()
+    amount = parse_amount(t)
+    if amount is None:
+        return await m.answer("Не понял. Напиши число, например 5000.")
+    pending.pop(uid, None)
+
+    async def out(text, kb):
+        await m.answer(text, reply_markup=kb)
+
+    await av_finish(uid, sub, amount, out)
 
 
 # ---------- любой текст = новый бренд
@@ -778,6 +1077,8 @@ async def add_brand(m: Message):
     if not has_access(m.from_user.id):
         return await deny(m)
     uid = m.from_user.id
+    if uid in pending and pending[uid].startswith(("avcity:", "avlim:")):
+        return await av_text_input(m, pending[uid])
     if uid in pending:
         what = pending[uid]
         t = m.text.strip().lower()

@@ -1,0 +1,41 @@
+name: poll
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: bot.db
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+      - name: Run
+        run: python run_once.py
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
+          AVITO_PROXY_URL: ${{ secrets.AVITO_PROXY_URL }}
+          LOOP_MINUTES: "50"
+          POLL_INTERVAL: "30"
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: bot.db
+          key: state-${{ github.run_id }}

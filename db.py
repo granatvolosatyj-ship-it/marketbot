@@ -25,6 +25,8 @@ class DB:
                 source TEXT, term TEXT, PRIMARY KEY(source, term));
             CREATE TABLE IF NOT EXISTS muted(
                 sub_id INTEGER PRIMARY KEY, until REAL);
+            CREATE TABLE IF NOT EXISTS avito(
+                sub_id INTEGER PRIMARY KEY, region TEXT, cat TEXT, max_rub REAL);
             CREATE TABLE IF NOT EXISTS favs(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
                 caption TEXT, photo TEXT, url TEXT, created REAL);
@@ -84,8 +86,31 @@ class DB:
 
     def del_sub(self, uid: int, sub_id: int):
         self.c.execute("DELETE FROM sub_disabled WHERE sub_id IN (SELECT id FROM subs WHERE id=? AND user_id=?)", (sub_id, uid))
+        self.c.execute("DELETE FROM avito WHERE sub_id IN (SELECT id FROM subs WHERE id=? AND user_id=?)", (sub_id, uid))
         self.c.execute("DELETE FROM subs WHERE id=? AND user_id=?", (sub_id, uid))
         self.c.commit()
+
+    # Авито: настройки на бренд (есть строка = Авито включён для этого бренда)
+    def set_avito(self, sub_id: int, region: str | None, cat: str | None, max_rub: float | None):
+        self.c.execute("INSERT OR REPLACE INTO avito(sub_id, region, cat, max_rub) VALUES(?,?,?,?)",
+                       (sub_id, region, cat, max_rub))
+        self.c.commit()
+
+    def get_avito(self, sub_id: int):
+        return self.c.execute("SELECT region, cat, max_rub FROM avito WHERE sub_id=?", (sub_id,)).fetchone()
+
+    def del_avito(self, sub_id: int):
+        self.c.execute("DELETE FROM avito WHERE sub_id=?", (sub_id,))
+        self.c.commit()
+
+    def avito_active(self):
+        return self.c.execute(
+            """SELECT s.user_id, s.brand, a.region, a.cat, a.max_rub FROM avito a
+               JOIN subs s ON s.id=a.sub_id JOIN users u ON u.id=s.user_id
+               WHERE u.allowed=1 AND COALESCE(u.paused,0)=0 AND COALESCE(s.setup,0)=0
+               AND NOT EXISTS (SELECT 1 FROM muted m WHERE m.sub_id=s.id AND m.until>?)""",
+            (time.time(),),
+        ).fetchall()
 
     # площадки отдельно для каждого бренда
     def get_sub(self, uid: int, sub_id: int):
