@@ -27,6 +27,8 @@ class DB:
                 sub_id INTEGER PRIMARY KEY, until REAL);
             CREATE TABLE IF NOT EXISTS avito(
                 sub_id INTEGER PRIMARY KEY, region TEXT, cat TEXT, max_rub REAL);
+            CREATE TABLE IF NOT EXISTS refs(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, sub_id INTEGER, emb BLOB);
             CREATE TABLE IF NOT EXISTS favs(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
                 caption TEXT, photo TEXT, url TEXT, created REAL);
@@ -87,8 +89,29 @@ class DB:
     def del_sub(self, uid: int, sub_id: int):
         self.c.execute("DELETE FROM sub_disabled WHERE sub_id IN (SELECT id FROM subs WHERE id=? AND user_id=?)", (sub_id, uid))
         self.c.execute("DELETE FROM avito WHERE sub_id IN (SELECT id FROM subs WHERE id=? AND user_id=?)", (sub_id, uid))
+        self.c.execute("DELETE FROM refs WHERE sub_id IN (SELECT id FROM subs WHERE id=? AND user_id=?)", (sub_id, uid))
         self.c.execute("DELETE FROM subs WHERE id=? AND user_id=?", (sub_id, uid))
         self.c.commit()
+
+    # фото-поиск: эталонные фото бренда (вектор CLIP)
+    def add_ref(self, sub_id: int, emb: bytes):
+        self.c.execute("INSERT INTO refs(sub_id, emb) VALUES(?,?)", (sub_id, emb))
+        self.c.commit()
+
+    def ref_count(self, sub_id: int) -> int:
+        return self.c.execute("SELECT COUNT(*) AS n FROM refs WHERE sub_id=?", (sub_id,)).fetchone()["n"]
+
+    def clear_refs(self, sub_id: int):
+        self.c.execute("DELETE FROM refs WHERE sub_id=?", (sub_id,))
+        self.c.commit()
+
+    def refs_by_brand(self, brand: str) -> dict[int, list[bytes]]:
+        rows = self.c.execute(
+            "SELECT r.sub_id, r.emb FROM refs r JOIN subs s ON s.id=r.sub_id WHERE s.brand=?", (brand,)).fetchall()
+        out: dict[int, list[bytes]] = {}
+        for r in rows:
+            out.setdefault(r["sub_id"], []).append(r["emb"])
+        return out
 
     # Авито: настройки на бренд (есть строка = Авито включён для этого бренда)
     def set_avito(self, sub_id: int, region: str | None, cat: str | None, max_rub: float | None):

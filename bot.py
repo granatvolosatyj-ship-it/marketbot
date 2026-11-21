@@ -13,6 +13,8 @@ import config
 from currency import Rates
 from db import DB
 import avito
+import io
+import vision
 from poller import run_poller
 from sources import build_sources
 
@@ -413,6 +415,7 @@ def source_title(s) -> str:
 
 SECTIONS = [
     ("vt", "🇪🇺 VINTED", lambda s: s.code.startswith("vinted_")),
+    ("eb", "🛒 EBAY", lambda s: s.code.startswith("ebay_")),
     ("jp", "🇯🇵 ЯПОНИЯ", lambda s: s.code.endswith("_jp")),
     ("kr", "🇰🇷 КОРЕЯ", lambda s: s.code.endswith("_kr") or s.code == "bunjang"),
     ("cn", "🇨🇳 КИТАЙ", lambda s: s.code.endswith("_cn")),
@@ -471,6 +474,9 @@ def brand_kb(sub_id: int, done: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🇯🇵🇰🇷 Азия", callback_data=f"bp:{sub_id}:asia"),
         ]
     )
+    nref = db.ref_count(sub_id)
+    if nref:
+        rows.append([InlineKeyboardButton(text=f"🖼 Поиск по фото: {nref} шт. (убрать)", callback_data=f"rf:{sub_id}")])
     av = db.get_avito(sub_id)
     rows.append([InlineKeyboardButton(
         text="🇷🇺 Авито: настроено ✅ (изменить)" if av else "🇷🇺 Добавить поиск на Авито",
@@ -595,7 +601,7 @@ async def brand_preset(c: CallbackQuery):
     if kind == "eu":
         off = {x for x in codes if not x.startswith("vinted_")}
     elif kind == "asia":
-        off = {x for x in codes if x.startswith("vinted_")}
+        off = {x for x in codes if not (x.endswith(("_jp", "_kr")) or x == "bunjang")}
     else:
         off = set()
     db.set_brand_sources(sub["id"], off)
@@ -1042,6 +1048,66 @@ async def av_text_input(m: Message, what: str):
     await av_finish(uid, sub, amount, out)
 
 
+# ---------- поиск по фото
+photo_buf: dict[int, list[bytes]] = {}
+
+
+async def attach_photos(m: Message, brand_text_in: str, photos: list[bytes]):
+    uid = m.from_user.id
+    brand = " ".join(brand_text_in.lower().split())[:50]
+    embs = [e for e in [await vision.embed_bytes(p) for p in photos] if e is not None]
+    if not embs:
+        return await m.answer(
+            "Не получилось разобрать фото: сравнение по фото сейчас недоступно "
+            "(модель ещё загружается, попробуй через пару минут).")
+    sub = next((s for s in db.user_subs(uid) if s["brand"] == brand), None)
+    is_new = sub is None
+    if is_new:
+        db.add_sub(uid, brand, setup=True)
+        sub = next(s for s in db.user_subs(uid) if s["brand"] == brand)
+    for e in embs:
+        db.add_ref(sub["id"], e.tobytes())
+    note = (f"Добавил <b>{html.escape(brand)}</b> ✅ и {len(embs)} фото.\n"
+            "Теперь по этому бренду пришлю только вещи, похожие на твои фото "
+            f"(порог схожести {config.PHOTO_MATCH * 100:.0f}%).")
+    if is_new:
+        pending[uid] = f"new:{sub['id']}"
+        return await m.answer(note + "\n\n" + step1_text(brand).split("\n\n", 1)[1], reply_markup=step1_kb(sub["id"]))
+    await m.answer(note, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Настройки бренда", callback_data=f"bpn:{sub['id']}")]]))
+
+
+@router.message(F.photo)
+async def got_photo(m: Message):
+    if not has_access(m.from_user.id):
+        return await deny(m)
+    uid = m.from_user.id
+    buf = io.BytesIO()
+    await m.bot.download(m.photo[-1], destination=buf)
+    if m.caption and m.caption.strip():  # бренд написан в подписи к фото
+        return await attach_photos(m, m.caption, [buf.getvalue()])
+    if pending.get(uid) != "photo":
+        photo_buf[uid] = []
+        pending[uid] = "photo"
+        await m.answer(
+            "Получил фото 📷. Какой это бренд? Напиши название (обязательно). "
+            "Можно прислать ещё фото этой вещи с другого ракурса, а потом написать бренд.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cin")]]))
+    photo_buf.setdefault(uid, []).append(buf.getvalue())
+
+
+@router.callback_query(F.data.startswith("rf:"))
+async def refs_clear(c: CallbackQuery):
+    if not has_access(c.from_user.id):
+        return await c.answer()
+    sub = db.get_sub(c.from_user.id, int(c.data.split(":")[1]))
+    if not sub:
+        return await c.answer("Бренд уже удалён")
+    db.clear_refs(sub["id"])
+    await c.message.edit_text(brand_text(sub), reply_markup=brand_kb(sub["id"]))
+    await c.answer("Фото убраны, приходит всё по бренду")
+
+
 # ---------- любой текст = новый бренд
 
 def _cmd(name: str) -> CommandObject:
@@ -1077,6 +1143,11 @@ async def add_brand(m: Message):
     if not has_access(m.from_user.id):
         return await deny(m)
     uid = m.from_user.id
+    if pending.get(uid) == "photo":  # ждали бренд для присланного фото
+        pending.pop(uid, None)
+        photos = photo_buf.pop(uid, [])
+        if photos:
+            return await attach_photos(m, m.text, photos)
     if uid in pending and pending[uid].startswith(("avcity:", "avlim:")):
         return await av_text_input(m, pending[uid])
     if uid in pending:

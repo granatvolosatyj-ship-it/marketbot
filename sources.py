@@ -48,6 +48,7 @@ def _vinted_ts(photo: str | None) -> float | None:
 
 
 class Source:
+    title_has_brand = False  # True: название объявления содержит бренд, посторонние бренды отсеиваем
     code = ""
     label = ""
     flag = ""
@@ -84,9 +85,10 @@ class Source:
 
 # ---------------------------------------------------------------- Vinted
 class Vinted(Source):
+    title_has_brand = True
     impersonate = True
-    interval = 60  # секунд между проверками (чаще Vinted блокирует: ошибка 429)
-    MIN_GAP = 2.0  # не чаще одного запроса к Vinted раз в столько секунд (на все страны сразу)
+    interval = 30  # секунд между началами кругов (если круг длиннее, следующий стартует сразу)
+    MIN_GAP = 1.5  # не чаще одного запроса к Vinted раз в столько секунд (на все страны сразу)
     _lock = None
     _last = 0.0
     _cool_until = 0.0  # общая пауза: Vinted ограничивает по адресу сервера, а не по стране
@@ -836,6 +838,95 @@ class SecondStreet(Source):
         return out
 
 
+# ---------------------------------------------------------------- eBay (официальный API)
+class Ebay(Source):
+    """eBay через официальный бесплатный Browse API: нужны EBAY_APP_ID и EBAY_CERT_ID."""
+
+    title_has_brand = True
+
+    interval = 300  # у бесплатного API лимит ~5000 запросов в сутки на все площадки
+    _token = None
+    _token_until = 0.0
+
+    def __init__(self, mkt: str, label: str, flag: str):
+        super().__init__()
+        self.mkt = mkt
+        self.code = "ebay_" + mkt.split("_")[1].lower()
+        self.label = label
+        self.flag = flag
+        self.currency = "USD"
+
+    async def _auth(self) -> str:
+        if Ebay._token and time.time() < Ebay._token_until:
+            return Ebay._token
+        cred = base64.b64encode(f"{config.EBAY_APP_ID}:{config.EBAY_CERT_ID}".encode()).decode()
+        r = await self.client.post(
+            "https://api.ebay.com/identity/v1/oauth2/token",
+            headers={"Authorization": f"Basic {cred}", "Content-Type": "application/x-www-form-urlencoded"},
+            data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"},
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"eBay: ключи не приняты (HTTP {r.status_code}) {r.text[:120]}")
+        j = r.json()
+        Ebay._token = j["access_token"]
+        Ebay._token_until = time.time() + int(j.get("expires_in", 7200)) - 300
+        return Ebay._token
+
+    async def _raw(self, term: str):
+        tok = await self._auth()
+        return await self.client.get(
+            "https://api.ebay.com/buy/browse/v1/item_summary/search",
+            params={"q": term, "sort": "newlyListed", "limit": 50},
+            headers={"Authorization": f"Bearer {tok}", "X-EBAY-C-MARKETPLACE-ID": self.mkt},
+        )
+
+    async def search(self, term: str) -> list[Item]:
+        r = await self._raw(term)
+        if r.status_code == 401:
+            Ebay._token = None
+        r.raise_for_status()
+        out = []
+        for it in r.json().get("itemSummaries", []):
+            try:
+                price = float(it["price"]["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            created = None
+            if it.get("itemCreationDate"):
+                from datetime import datetime
+
+                try:
+                    created = datetime.fromisoformat(it["itemCreationDate"].replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    pass
+            out.append(Item(self.code, str(it.get("itemId")), it.get("title", "Товар eBay")[:200], price,
+                            it["price"].get("currency", "USD"), it.get("itemWebUrl", ""),
+                            (it.get("image") or {}).get("imageUrl"), created))
+        return out
+
+    async def diag(self, term: str) -> str:
+        r = await self._raw(term)
+        lines = [f"HTTP {r.status_code}, {len(r.text)} симв."]
+        if r.status_code == 200:
+            for it in self._first(r.json()):
+                lines.append(it)
+        else:
+            lines.append(" ".join(r.text.split())[:300])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _first(j):
+        for it in j.get("itemSummaries", [])[:3]:
+            p = it.get("price", {})
+            yield f"• {it.get('title','')[:60]} | {p.get('value')} {p.get('currency')} | {it.get('itemCreationDate')}"
+
+
+EBAY_MARKETS = [
+    ("EBAY_US", "eBay США", "🇺🇸"), ("EBAY_DE", "eBay Германия", "🇩🇪"), ("EBAY_GB", "eBay Великобритания", "🇬🇧"),
+    ("EBAY_IT", "eBay Италия", "🇮🇹"), ("EBAY_FR", "eBay Франция", "🇫🇷"),
+]
+
+
 # ------------------------------------------- Площадки, которые ещё не готовы
 class NotReady(Source):
     ready = False
@@ -855,6 +946,8 @@ VINTED_DOMAINS = [
 def build_sources() -> list[Source]:
     s: list[Source] = [Vinted(*d) for d in VINTED_DOMAINS]
     s += [MercariJP(), Bunjang(), FruitsFamily(), SecondStreet()]
+    if config.EBAY_APP_ID and config.EBAY_CERT_ID:
+        s += [Ebay(*m) for m in EBAY_MARKETS]
     # В разработке: запросы этих площадок ещё не изучены
     s += [
         NotReady("95_cn", "95分", "🇨🇳", "CNY"),

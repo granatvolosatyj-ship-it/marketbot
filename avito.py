@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from urllib.parse import quote
 
 import config
+import translate
 from poller import MAX_AGE, MAX_PER_TERM, format_caption, send
 from sources import Item
 
@@ -193,6 +194,8 @@ async def cycle(db, bot, rates):
         key = f"{brand}|{region or ''}|{cat or ''}"
         try:
             items = await search(brand, region, cat)
+            names = await translate.names(brand, brand)
+            items = [i for i in items if translate.has_brand(i.title, names)]  # только нужный бренд
         except Exception as e:
             log.warning("avito '%s': %s", brand, e)
             await asyncio.sleep(random.uniform(3, 6))

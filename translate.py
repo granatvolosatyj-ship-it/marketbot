@@ -119,3 +119,26 @@ async def queries(brand: str, lang: str | None) -> list[str]:
             seen.add(q.lower())
             res.append(q)
     return res
+
+
+def norm(s: str) -> str:
+    """Для сравнения: без регистра, пробелов, дефисов и апострофов (stone island = stone-island)."""
+    import re
+
+    return re.sub(r"[\s\-_'’`.]+", "", (s or "").lower())
+
+
+async def names(brand: str, query: str) -> list[str]:
+    """Все написания бренда: как ввёл человек, как искали, латиница, русский, японский, корейский."""
+    lat = await latin(brand)
+    out = {brand, query, lat}
+    for tbl in (BRANDS.get(lat, ()),):
+        out.update(tbl)
+    if lat in RU:
+        out.add(RU[lat])
+    return [n for n in {norm(x) for x in out} if n]
+
+
+def has_brand(title: str, brand_names: list[str]) -> bool:
+    t = norm(title)
+    return any(n in t for n in brand_names)

@@ -16,9 +16,12 @@ def _load_env():
 
 _load_env()
 
-BOT_TOKEN = (__import__("re").findall(r"\d{6,}:[A-Za-z0-9_-]{30,}", os.environ.get("BOT_TOKEN", "")) or [""])[0]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID") or 0)
 RATE_MARKUP = 1 + float(os.environ.get("RATE_MARKUP_PERCENT") or 8) / 100
 PROXY_URL = os.environ.get("PROXY_URL") or None
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL") or 45)
 DB_PATH = os.environ.get("DB_PATH", "bot.db")
+EBAY_APP_ID = os.environ.get("EBAY_APP_ID", "")
+EBAY_CERT_ID = os.environ.get("EBAY_CERT_ID", "")
+PHOTO_MATCH = float(os.environ.get("PHOTO_MATCH") or 0.80)  # порог схожести фото (0..1)

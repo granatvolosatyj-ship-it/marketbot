@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 
 import config
 import translate
+import vision
 from currency import Rates
 from db import DB
 from sources import Item, Source
@@ -83,6 +84,9 @@ def dedup_key(source: Source, item) -> str:
 
 async def process(db: DB, bot: Bot, rates: Rates, source: Source, brand: str, query: str):
     items = await source.search(query)
+    if getattr(source, "title_has_brand", False):  # поиск подмешивает чужие бренды: оставляем только нужный
+        names = await translate.names(brand, query)
+        items = [i for i in items if translate.has_brand(i.title, names)]
     first_time = not db.is_baselined(source.code, query)
     new = [i for i in items if not db.is_seen(source.code, i.id)]
     for i in new:
@@ -95,15 +99,31 @@ async def process(db: DB, bot: Bot, rates: Rates, source: Source, brand: str, qu
                 db.claim_sent(uid, dedup_key(source, i))
         return
     fresh = [i for i in new if not i.created or time.time() - i.created < MAX_AGE]  # старые объявления не шлём
+    refs = {sid: [vision.from_bytes(b) for b in bl] for sid, bl in db.refs_by_brand(brand).items()}
     for i in list(reversed(fresh))[-MAX_PER_TERM:]:  # от старых к новым
         caption = format_caption(i, source, brand, rates)
         key = dedup_key(source, i)
         rub = rates.to_rub(i.price, i.currency)
+        emb, emb_done = None, False
         for uid, limit, sub_id in users:
             if limit and rub is not None and rub > limit:
                 continue  # дороже лимита цены
+            extra = ""
+            if sub_id in refs:  # бренд с фото: присылаем только похожее на твои фото
+                if not emb_done:
+                    emb = await vision.embed_url(i.photo) if i.photo else None
+                    emb_done = True
+                if emb is None:
+                    if not vision.failed():
+                        continue  # фото объявления не сравнить: не показываем
+                    extra = "\n⚠️ Сравнение по фото сейчас недоступно"
+                else:
+                    sim = max(vision.similarity(emb, r) for r in refs[sub_id])
+                    if sim < config.PHOTO_MATCH:
+                        continue  # не похоже на твоё фото
+                    extra = f"\n🖼 Похоже на твоё фото: {sim * 100:.0f}%"
             if db.claim_sent(uid, key):  # одно и то же объявление в другой стране/по другому бренду не шлём
-                await send(bot, uid, i, caption)
+                await send(bot, uid, i, caption + extra)
 
 
 async def poll_source_once(db: DB, bot: Bot, rates: Rates, source: Source) -> tuple[int, int]:
@@ -137,6 +157,7 @@ async def source_loop(db: DB, bot: Bot, rates: Rates, source: Source, end: float
     # разносим старт площадок по времени, чтобы запросы не шли пачкой
     await asyncio.sleep(random.uniform(0, min(interval, 60) if getattr(source, "interval", None) else 5))
     while True:
+        t0 = time.monotonic()
         try:
             ok, fail = await poll_source_once(db, bot, rates, source)
             backoff = min(backoff * 2 + 30, 600) if (fail and not ok) else 0
@@ -145,7 +166,9 @@ async def source_loop(db: DB, bot: Bot, rates: Rates, source: Source, end: float
             log.warning("%s: ошибка %s, пауза %ss", source.code, e, backoff)
         if end is not None and time.monotonic() >= end:
             break
-        await asyncio.sleep(interval + backoff + random.uniform(0, 3))
+        # интервал считаем от НАЧАЛА круга: если круг уже длился дольше, следующий стартует сразу
+        spent = time.monotonic() - t0
+        await asyncio.sleep(max(1.0, interval - spent) + backoff + random.uniform(0, 1))
 
 
 async def run_poller(db: DB, bot: Bot, rates: Rates, sources: list[Source]):
