@@ -61,12 +61,10 @@ async def send(bot: Bot, uid: int, item: Item, caption: str, kb: InlineKeyboardM
         try:
             if item.photo:
                 try:
-                    await bot.send_photo(uid, item.photo, caption=caption, reply_markup=kb)
-                    return
+                    return await bot.send_photo(uid, item.photo, caption=caption, reply_markup=kb)
                 except TelegramBadRequest:
                     pass  # плохое фото: шлём текстом
-            await bot.send_message(uid, caption, disable_web_page_preview=False, reply_markup=kb)
-            return
+            return await bot.send_message(uid, caption, disable_web_page_preview=False, reply_markup=kb)
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
         except TelegramForbiddenError:
@@ -75,6 +73,41 @@ async def send(bot: Bot, uid: int, item: Item, caption: str, kb: InlineKeyboardM
             if kb is None:
                 return
             kb = None  # вдруг кнопка с неверной ссылкой: шлём без кнопок
+
+
+
+# ------------------------------------------------ Certilogo (Stone Island, C.P. Company)
+CERTI_BRANDS = {"stoneisland", "cpcompany"}
+CERTI_WORDS = ("certilogo", "certi logo", "certi-logo", "сертилого", "серти лого", "серти-лого")
+
+
+async def certilogo_note(source, item: Item) -> str | None:
+    """Смотрит описание объявления: упомянут ли Certilogo. Проверить сам код может только человек
+    на certilogo.com (у сервиса нет открытого API), поэтому это именно пометка, а не проверка подлинности."""
+    try:
+        r = await asyncio.wait_for(source.get(item.url, headers={"Accept": "text/html"}), timeout=20)
+        if r.status_code != 200:
+            return None
+        text = r.text.lower()
+        if any(w in text for w in CERTI_WORDS):
+            return "🔎 Certilogo: упомянут в объявлении. Код надо проверить самому на certilogo.com (бот сам подлинность не проверяет)"
+        return "🔎 Certilogo: в объявлении не упомянут (подлинность не подтверждена)"
+    except Exception as e:
+        log.warning("certilogo %s: %r", item.url, e)
+        return None
+
+
+async def add_note(bot: Bot, uid: int, msg, text: str, note_task):
+    note = await note_task
+    if not note or msg is None:
+        return
+    try:
+        if getattr(msg, "photo", None):
+            await bot.edit_message_caption(chat_id=uid, message_id=msg.message_id, caption=text + "\n" + note)
+        else:
+            await bot.edit_message_text(text + "\n" + note, chat_id=uid, message_id=msg.message_id)
+    except Exception as e:
+        log.warning("не удалось дописать Certilogo: %r", e)
 
 
 def dedup_key(source: Source, item) -> str:
@@ -99,12 +132,14 @@ async def process(db: DB, bot: Bot, rates: Rates, source: Source, brand: str, qu
                 db.claim_sent(uid, dedup_key(source, i))
         return
     fresh = [i for i in new if not i.created or time.time() - i.created < MAX_AGE]  # старые объявления не шлём
+    certi = source.code.startswith("vinted_") and translate.norm(await translate.latin(brand)) in CERTI_BRANDS
     refs = {sid: [vision.from_bytes(b) for b in bl] for sid, bl in db.refs_by_brand(brand).items()}
     for i in list(reversed(fresh))[-MAX_PER_TERM:]:  # от старых к новым
         caption = format_caption(i, source, brand, rates)
         key = dedup_key(source, i)
         rub = rates.to_rub(i.price, i.currency)
         emb, emb_done = None, False
+        note_task = None
         for uid, limit, sub_id in users:
             if limit and rub is not None and rub > limit:
                 continue  # дороже лимита цены
@@ -123,7 +158,11 @@ async def process(db: DB, bot: Bot, rates: Rates, source: Source, brand: str, qu
                         continue  # не похоже на твоё фото
                     extra = f"\n🖼 Похоже на твоё фото: {sim * 100:.0f}%"
             if db.claim_sent(uid, key):  # одно и то же объявление в другой стране/по другому бренду не шлём
-                await send(bot, uid, i, caption + extra)
+                msg = await send(bot, uid, i, caption + extra)  # сначала сразу, без ожидания проверок
+                if certi and msg is not None:
+                    if note_task is None:
+                        note_task = asyncio.create_task(certilogo_note(source, i))
+                    asyncio.create_task(add_note(bot, uid, msg, caption + extra, note_task))
 
 
 async def poll_source_once(db: DB, bot: Bot, rates: Rates, source: Source) -> tuple[int, int]:
